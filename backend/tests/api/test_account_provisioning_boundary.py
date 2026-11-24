@@ -267,10 +267,12 @@ def test_account_mutations_are_tenant_scoped_and_fail_closed_on_audit_loss(
     assert db_session.query(AuditLog).count() == 0
 
 
-@pytest.mark.parametrize("platform", [False, True])
-def test_company_provisioning_never_grants_platform_authority_and_is_audited(client, db_session, platform):
-    actor = make_user(db_session, UserRole.PLATFORM_ADMIN if platform else UserRole.ADMIN)
+def test_company_provisioning_never_grants_platform_authority_and_is_audited(client, db_session):
+    # POST /platform/companies is the one company-creation door left (the public
+    # /companies/register self-registration route was deleted 2026-11-23).
+    actor = make_user(db_session, UserRole.PLATFORM_ADMIN)
     body = dict(
+        name="New Company",
         admin_email="newadmin@example.com",
         admin_first_name="New",
         admin_last_name="Admin",
@@ -278,14 +280,44 @@ def test_company_provisioning_never_grants_platform_authority_and_is_audited(cli
         role="platform_admin",
         is_superuser=True,
     )
-    body["name" if platform else "company_name"] = "New Company"
-    path = "/api/v1/platform/companies" if platform else "/api/v1/companies/register"
-    response = client.post(path, headers=headers(actor), json=body)
+    response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
     assert response.status_code == 200, response.text
     db_session.rollback()
     user = db_session.query(User).filter_by(email="newadmin@example.com").one()
     assert user.role == UserRole.ADMIN and user.is_superuser is False and user.company_id != actor.company_id
     assert db_session.query(AuditLog).filter_by(company_id=user.company_id).count() == 2
+
+
+def test_tenant_admin_cannot_create_a_company(client, db_session):
+    """A tenant Admin (not a platform principal) is refused at the only company-creation door."""
+    actor = make_user(db_session)
+    body = dict(
+        name="New Company",
+        admin_email="newadmin@example.com",
+        admin_first_name="New",
+        admin_last_name="Admin",
+        admin_password=PASSWORD,
+    )
+    response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
+    assert response.status_code == 403, response.text
+    db_session.rollback()
+    assert db_session.query(Company).count() == 1
+    assert db_session.query(User).filter_by(email="newadmin@example.com").count() == 0
+
+
+def test_anonymous_company_self_registration_route_is_gone(client, db_session):
+    body = dict(
+        company_name="New Company",
+        admin_email="newadmin@example.com",
+        admin_first_name="New",
+        admin_last_name="Admin",
+        admin_password=PASSWORD,
+    )
+    response = client.post("/api/v1/companies/register", json=body)
+    assert response.status_code in (404, 405), response.text
+    db_session.rollback()
+    assert db_session.query(Company).count() == 1
+    assert db_session.query(User).filter_by(email="newadmin@example.com").count() == 0
 
 
 def test_tenant_admin_cannot_invoke_platform_company_mutation(client, db_session):
@@ -400,8 +432,7 @@ def test_public_registration_ignores_caller_platform_and_company_claims(client, 
     assert user.company_id == 1
 
 
-@pytest.mark.parametrize("path", ["/api/v1/companies/register", "/api/v1/platform/companies"])
-def test_company_onboarding_rolls_back_even_when_second_audit_fails(client, db_session, monkeypatch, path):
+def test_company_onboarding_rolls_back_even_when_second_audit_fails(client, db_session, monkeypatch):
     actor = make_user(db_session, UserRole.PLATFORM_ADMIN)
     original = AuditService.log
 
@@ -414,9 +445,9 @@ def test_company_onboarding_rolls_back_even_when_second_audit_fails(client, db_s
         admin_first_name="New",
         admin_last_name="Admin",
         admin_password=PASSWORD,
+        name="New Company",
     )
-    body["name" if path.endswith("/companies") else "company_name"] = "New Company"
-    response = client.post(path, headers=headers(actor), json=body)
+    response = client.post("/api/v1/platform/companies", headers=headers(actor), json=body)
     assert response.status_code == 503, response.text
     db_session.rollback()
     assert db_session.query(Company).count() == 1 and db_session.query(User).count() == 1

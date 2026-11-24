@@ -255,7 +255,7 @@ def _fail_after_validation(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("provisioning store unavailable")
 
     monkeypatch.setattr("app.api.endpoints.users.create_tenant_user", boom)
-    monkeypatch.setattr("app.api.endpoints.companies.onboard_company", boom)
+    monkeypatch.setattr("app.api.endpoints.platform.onboard_company", boom)
 
 
 def _post_user(client: TestClient, headers: Dict[str, str]):
@@ -273,27 +273,52 @@ def _post_user(client: TestClient, headers: Dict[str, str]):
     )
 
 
-def _post_company_signup(client: TestClient):
+def _post_platform_company(client: TestClient, db_session):
+    """``POST /platform/companies``, the one company-creation door left (the public
+    ``/companies/register`` signup was deleted 2026-11-23). Its ``CompanyCreate`` body
+    carries ``admin_password``."""
+    from app.core.security import create_access_token
+    from app.models.user import User, UserRole
+
+    actor = User(
+        company_id=1,
+        email="platform.probe@werco.com",
+        employee_id="PLATFORM-PROBE",
+        first_name="Platform",
+        last_name="Probe",
+        role=UserRole.PLATFORM_ADMIN,
+        is_active=True,
+        hashed_password="x",  # never used: the token is minted directly
+    )
+    db_session.add(actor)
+    db_session.commit()
     return client.post(
-        "/api/v1/companies/register",
+        "/api/v1/platform/companies",
         json={
-            "company_name": "Signup Probe Co",
+            "name": "Signup Probe Co",
             "admin_email": "owner@signup-probe.com",
             "admin_first_name": "Owner",
             "admin_last_name": "Probe",
             "admin_password": PASSWORD,
         },
-        headers={"X-Requested-With": "XMLHttpRequest"},
+        headers={
+            "Authorization": "Bearer " + create_access_token(subject=actor.id, company_id=actor.company_id),
+            "X-Requested-With": "XMLHttpRequest",
+        },
     )
 
 
-@pytest.mark.parametrize("route", ["users_create", "company_signup"])
+@pytest.mark.parametrize("route", ["users_create", "platform_company_create"])
 def test_a_password_create_route_error_event_carries_no_password(
-    sentry_events, real_client, admin_headers, monkeypatch, route
+    sentry_events, real_client, db_session, admin_headers, monkeypatch, route
 ):
     _fail_after_validation(monkeypatch)
 
-    response = _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+    response = (
+        _post_user(real_client, admin_headers)
+        if route == "users_create"
+        else _post_platform_company(real_client, db_session)
+    )
 
     assert response.status_code == 500, response.text
     serialized = _serialized(sentry_events)
@@ -301,9 +326,9 @@ def test_a_password_create_route_error_event_carries_no_password(
     assert "$2b$" not in serialized
 
 
-@pytest.mark.parametrize("route", ["users_create", "company_signup"])
+@pytest.mark.parametrize("route", ["users_create", "platform_company_create"])
 def test_control_without_before_send_the_password_does_leak(
-    sentry_events, real_client, admin_headers, monkeypatch, route
+    sentry_events, real_client, db_session, admin_headers, monkeypatch, route
 ):
     """Non-vacuity: the same requests with only the key scrubber leak the password."""
     sentry_sdk.get_client().close()
@@ -311,7 +336,11 @@ def test_control_without_before_send_the_password_does_leak(
     app_main.init_sentry()
     _fail_after_validation(monkeypatch)
 
-    _post_user(real_client, admin_headers) if route == "users_create" else _post_company_signup(real_client)
+    (
+        _post_user(real_client, admin_headers)
+        if route == "users_create"
+        else _post_platform_company(real_client, db_session)
+    )
 
     assert PASSWORD in _serialized(sentry_events)
 

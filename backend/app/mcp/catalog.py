@@ -180,7 +180,6 @@ PUBLIC_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
         ("POST", "/api/v1/auth/reset-database"),
         ("POST", "/api/v1/shop-floor/kiosk-stations/station-login"),
         ("POST", "/api/v1/webhooks/carriers/{provider}"),
-        ("POST", "/api/v1/companies/register"),
         ("POST", "/api/v1/visitor-logs/station-login"),
         ("POST", "/api/v1/errors/log"),
         ("GET", "/api/v1/errors/health"),

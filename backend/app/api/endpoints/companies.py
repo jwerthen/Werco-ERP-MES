@@ -1,8 +1,13 @@
 """
-Company self-registration and self-management endpoints.
+Company self-management endpoints (the caller's own active company).
+
+There is deliberately no public company self-registration route: Werco is the only
+company on this system (owner decision 2026-11-23). A company is created only by a
+platform admin (``POST /platform/companies``) or by the empty-install bootstrap
+(``POST /setup/initialize``).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -14,9 +19,7 @@ from app.api.deps import (
     get_current_user,
     require_role,
 )
-from app.core.config import settings
 from app.core.credentials import API_TOKEN_EGRESS_SWITCH, API_TOKEN_FLOOR_PIN_ADMIN, is_api_token_credential
-from app.core.security import create_access_token, create_refresh_token
 from app.db.database import get_db
 from app.models.company import Company
 from app.models.user import User, UserRole
@@ -24,14 +27,11 @@ from app.schemas.company import (
     CompanyAIEgressUpdate,
     CompanyFloorPinPolicyResponse,
     CompanyFloorPinPolicyUpdate,
-    CompanyRegister,
     CompanyResponse,
     CompanySMSEgressUpdate,
     CompanyUpdate,
 )
-from app.schemas.user import Token, UserResponse
 from app.services.audit_service import AuditService
-from app.services.company_onboarding import onboard_company
 
 router = APIRouter()
 
@@ -55,38 +55,6 @@ def _refuse_api_token_egress_switch(current_user: User) -> None:
     """
     if is_api_token_credential(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=API_TOKEN_EGRESS_SWITCH)
-
-
-@router.post("/register", response_model=Token, summary="Register a new company")
-def register_company(request: Request, payload: CompanyRegister, db: Session = Depends(get_db)):
-    """
-    Self-registration: creates a new company and its initial admin user.
-    Returns JWT tokens for immediate login.
-    """
-    # Check if email is already used
-    if db.query(User).filter(User.email == payload.admin_email).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-
-    company, admin_user = onboard_company(
-        db=db,
-        name=payload.company_name,
-        admin_email=payload.admin_email,
-        admin_first_name=payload.admin_first_name,
-        admin_last_name=payload.admin_last_name,
-        admin_password=payload.admin_password,
-        request=request,
-    )
-
-    access_token = create_access_token(subject=admin_user.id, company_id=company.id)
-    refresh_token, _, _ = create_refresh_token(subject=admin_user.id, company_id=company.id)
-
-    return Token(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="bearer",
-        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=UserResponse.model_validate(admin_user),
-    )
 
 
 @router.get("/me", response_model=CompanyResponse, summary="Get current company info")

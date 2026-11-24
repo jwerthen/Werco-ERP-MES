@@ -63,7 +63,7 @@ SENTRY_EXTRA_DENYLIST = (
 #      ``limit_json_body_size`` ``body`` hold ``b'{"employee_id": "0042", "pin": "2580"}'`` as a
 #      repr string while the route runs, in every traceback;
 #   2. the repr of a request model in a frame variable -- ``UserCreate(email=..., password='...')``
-#      on ``POST /users/``, ``CompanyRegister(..., admin_password='...')`` on the public signup;
+#      on ``POST /users/``, ``CompanyCreate(..., admin_password='...')`` on ``POST /platform/companies``;
 #   3. ``key=value`` / ``"key": "value"`` text inside any string: an exception message, a log
 #      message or its params, a breadcrumb, an extra;
 #   4. a bcrypt hash anywhere (a hash of a 4-6 digit PIN IS the PIN to anyone who can run bcrypt);

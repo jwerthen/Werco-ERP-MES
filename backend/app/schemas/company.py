@@ -19,25 +19,6 @@ class CompanyBase(UTCModel):
     website: Optional[str] = Field(None, max_length=255)
 
 
-class CompanyRegister(BaseModel):
-    """Self-registration: creates a new company + admin user"""
-
-    company_name: str = Field(..., min_length=1, max_length=255)
-    admin_email: EmailStr
-    admin_first_name: str = Field(..., min_length=1, max_length=50)
-    admin_last_name: str = Field(..., min_length=1, max_length=50)
-    admin_password: str = Field(..., min_length=12, max_length=128)
-
-    @field_validator('admin_password')
-    @classmethod
-    def validate_password(cls, v: str) -> str:
-        # Reuse the canonical AS9100D/CMMC strength policy (schemas.user) so the
-        # UNAUTHENTICATED self-registration path can't accept a weaker first-admin
-        # password than /auth/register. Previously omitted the common-substring
-        # check, so "Password1234!" was accepted here.
-        return validate_password_strength(v)
-
-
 class CompanyCreate(CompanyBase):
     """Platform admin creates a company + initial admin"""
 
@@ -50,9 +31,9 @@ class CompanyCreate(CompanyBase):
     @field_validator('admin_password')
     @classmethod
     def validate_password(cls, v: str) -> str:
-        # Platform-admin company creation must meet the same first-admin strength
-        # policy as self-registration; without this the POST /platform/companies
-        # path accepted any 12-char password (no complexity check at all).
+        # Platform-admin company creation must meet the canonical first-admin strength
+        # policy (schemas.user); without this the POST /platform/companies path
+        # accepted any 12-char password (no complexity check at all).
         return validate_password_strength(v)
 
 
