@@ -26,10 +26,14 @@ async def run_mrp_task(
     one company's demand against another's inventory).
 
     Args:
-        mode: Auto-processing mode (REVIEW, AUTO_DRAFT, AUTO_SUBMIT)
+        mode: Auto-processing mode. REVIEW (what the cron runs) only computes the run and
+            tells the planners; AUTO_DRAFT also drafts POs and is never scheduled. Any other
+            value is refused before anything runs.
         planning_horizon_days: Planning horizon in days
         company_id: Run for a single tenant; ``None`` runs every active tenant
     """
+    if mode not in MRPAutoMode.ALL:
+        raise ValueError(f"Unknown MRP mode {mode!r}; use REVIEW or AUTO_DRAFT")
     db = SessionLocal()
     try:
         if company_id is not None:
@@ -89,7 +93,7 @@ async def _run_mrp_for_company(db, company_id: int, mode: str, planning_horizon_
         logger.info(
             f"Auto-processed MRP actions: "
             f"{results['pos_created']} POs, "
-            f"{results['wos_created']} WOs, "
+            f"{results['manufacture_left_for_review']} MANUFACTURE left for review, "
             f"{results['errors']} errors"
         )
 

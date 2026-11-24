@@ -2,16 +2,17 @@
 (fix/wo-remediation-followups, FIX 3).
 
 ``WorkerSettings.cron_jobs`` previously built with a ``TypeError`` because a cron entry tried
-to pass ``kwargs=`` through ``arq.cron`` for the MRP AUTO_DRAFT pass (cron coroutines are fired
-with only ``ctx``). The fix introduces ``run_mrp_auto_draft_job(ctx)`` -- a thin wrapper that
-pins ``mode="AUTO_DRAFT"`` and delegates to ``run_mrp_job`` -- and registers it in BOTH
-``cron_jobs`` (6 AM) and ``functions``.
+to pass ``kwargs=`` through ``arq.cron`` for the MRP pass (cron coroutines are fired with only
+``ctx``). The fix introduced a thin ``ctx``-only wrapper registered in BOTH ``cron_jobs`` (6 AM)
+and ``functions``. Since 2026-11-23 that wrapper is ``run_mrp_review_job`` and pins
+``mode="REVIEW"`` -- the scheduled MRP pass drafts nothing (plan mrp/6 step 1); the old
+``run_mrp_auto_draft_job`` is gone.
 
 Guards:
   - importing ``WorkerSettings`` and reading ``cron_jobs`` no longer raises, and the list is
     fully built (>= 9 entries),
-  - ``run_mrp_auto_draft_job`` is a registered worker function, and
-  - calling it delegates to ``run_mrp_job`` with ``mode="AUTO_DRAFT"``.
+  - ``run_mrp_review_job`` is a registered worker function and the old auto-draft one is not,
+  - calling it delegates to ``run_mrp_job`` with ``mode="REVIEW"``.
 """
 
 import pytest
@@ -28,13 +29,16 @@ def test_worker_settings_cron_jobs_build_without_error():
     assert len(cron_jobs) >= 9
 
 
-def test_run_mrp_auto_draft_job_registered_as_function():
-    from app.worker import WorkerSettings, run_mrp_auto_draft_job
+def test_run_mrp_review_job_registered_and_the_auto_draft_job_is_gone():
+    import app.worker as worker
 
-    assert run_mrp_auto_draft_job in WorkerSettings.functions
+    assert worker.run_mrp_review_job in worker.WorkerSettings.functions
+    assert not hasattr(worker, "run_mrp_auto_draft_job")
+    names = {getattr(f, "__name__", "") for f in worker.WorkerSettings.functions}
+    assert "run_mrp_auto_draft_job" not in names
 
 
-def test_run_mrp_auto_draft_job_delegates_with_auto_draft_mode(monkeypatch):
+def test_run_mrp_review_job_delegates_with_review_mode(monkeypatch):
     import app.worker as worker
 
     captured = {}
@@ -50,16 +54,15 @@ def test_run_mrp_auto_draft_job_delegates_with_auto_draft_mode(monkeypatch):
     import asyncio
 
     ctx = {"job_id": "test"}
-    result = asyncio.run(worker.run_mrp_auto_draft_job(ctx))
+    result = asyncio.run(worker.run_mrp_review_job(ctx))
 
     assert result == {"ok": True}
     assert captured["ctx"] is ctx
-    assert captured["mode"] == "AUTO_DRAFT"
+    assert captured["mode"] == "REVIEW"
 
 
 def test_run_mrp_job_default_mode_is_review_not_auto_draft(monkeypatch):
-    """Contrast lock: the bare ``run_mrp_job`` defaults to REVIEW; only the wrapper pins
-    AUTO_DRAFT. Pins that AUTO_DRAFT is opt-in, not the request default."""
+    """The bare ``run_mrp_job`` defaults to REVIEW too: AUTO_DRAFT is opt-in, never a default."""
     import app.worker as worker
 
     captured = {}
