@@ -32,6 +32,8 @@
   "/inventory/parts",
   "/job-costing",
   "/kiosk",
+  "/labor-review",
+  "/laser-nests/untied",
   "/maintenance",
   "/materials",
   "/mrp",
