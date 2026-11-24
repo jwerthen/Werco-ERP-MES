@@ -16,6 +16,7 @@ What is pinned:
 * Every other ``WorkOrderResponse`` route still validates, with both fields null.
 """
 
+import re
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -274,14 +275,30 @@ def test_status_follows_the_job_cost(client, db_session):
     assert get_by_id(client, admin, wo.id)["job_cost_actuals"]["status"] == "reviewed"
 
 
-# Foreign-tenant amounts: an integer part of five or more digits before the "." means no
-# server-clock instant in the response can contain them by chance (see could_occur_in_iso_timestamp).
-FOREIGN_COST = 98765.4321
-FOREIGN_TOTAL = 197530.8642
+# Foreign-tenant amounts. Five or more integer digits before the "." means no server-clock
+# instant in the response can contain the "98765." style needles (see could_occur_in_iso_timestamp).
+# Both fractions are below .5 so each amount ROUNDS to its own integer part: the whole-number
+# form a leak would print (98765, 197530) is the digit run the patterns below search for. The
+# total is the exact sum the row stores, and both serialize as written (repr round-trips).
+FOREIGN_COST = 98765.1234
+FOREIGN_TOTAL = 197530.2468
+assert FOREIGN_COST + FOREIGN_COST == FOREIGN_TOTAL
+assert (repr(FOREIGN_COST), repr(FOREIGN_TOTAL)) == ("98765.1234", "197530.2468")
+assert (round(FOREIGN_COST), round(FOREIGN_TOTAL)) == (98765, 197530)
+
+# One optional thousands separator between the groups, however a formatter writes it: none,
+# ",", ".", "'", a space, a no-break space, a thin space or a narrow no-break space (literal, or
+# JSON-escaped). The integer groups lead every decimal spelling, so "98765.12", "98,765.12",
+# "98 765.12", the European "98.765,12" and the rounded "98765" all match.
+_THOUSANDS_SEPARATOR = r"(?:[,.' \u00a0\u2009\u202f]|\\u00a0|\\u2009|\\u202f)?"
+FOREIGN_AMOUNT_PATTERNS = tuple(
+    re.compile(_THOUSANDS_SEPARATOR.join((head, tail))) for head, tail in (("98", "765"), ("197", "530"))
+)
 
 
 def foreign_amounts_in(payload) -> list:
-    """Every number anywhere in ``payload`` that equals a foreign-tenant amount."""
+    """Every number anywhere in ``payload`` within 1 of a foreign-tenant amount, so the amount
+    rounded, truncated or ceiled to a whole number is caught as well as the amount itself."""
     found, stack = [], [payload]
     while stack:
         current = stack.pop()
@@ -290,7 +307,7 @@ def foreign_amounts_in(payload) -> list:
         elif isinstance(current, list):
             stack.extend(current)
         elif isinstance(current, (int, float)) and not isinstance(current, bool):
-            if any(abs(current - amount) < 0.01 for amount in (FOREIGN_COST, FOREIGN_TOTAL)):
+            if any(abs(current - amount) < 1 for amount in (FOREIGN_COST, FOREIGN_TOTAL)):
                 found.append(current)
     return found
 
@@ -337,14 +354,19 @@ def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(cli
     needles = ("98765.", "197530.")
     assert not [n for n in needles if could_occur_in_iso_timestamp(n.encode())], "needle fits in a timestamp"
     assert not [n for n in needles if n in by_number.text] and "FOREIGN" not in by_number.text
-    # The breadth "999" had: an amount written as a whole number or with a thousands separator.
-    # A bare five/six-digit run fits a microsecond field, so these are searched with every whole
-    # instant removed. What is left holds no other run that long by chance: ids, version and
-    # quantities are small, the due date is a date only (four-digit runs), and the work-order
-    # number's padded counter ("P13-WO-000nn") counts this module's rows, never near 98765.
-    bare_needles = ("98765", "197530", "98,765", "197,530")
+    # The breadth "999" had, and more: the amount as a whole number, or with any thousands
+    # separator or decimal comma, inside any string. Five digits with at most one character
+    # between groups fit a microsecond field, so the patterns run over the text with every real
+    # instant removed. What is left (dumped on 2026-11-24) holds exactly one digit run of five
+    # or more: the work-order number's zero-padded counter ("P13-WO-00030"), which counts this
+    # module's rows from 1 and so is "000" followed by a small number, never "98" or "197"
+    # followed by "765" / "530". Everything else is short: ids, version, quantities, the part
+    # number's unpadded counter, and the date-only due date (today + 30 days: digit runs of at
+    # most four split by "-", a character no pattern accepts between groups).
+    # The compact JSON puts no array of bare numbers in this body either, so "[98,765]" cannot
+    # arise from two small ids.
     without_instants = strip_iso_instants(by_number.text)
-    assert not [n for n in bare_needles if n in without_instants]
+    assert not [p.pattern for p in FOREIGN_AMOUNT_PATTERNS if p.search(without_instants)]
 
 
 def test_another_company_cannot_read_this_work_orders_cost(client, db_session):

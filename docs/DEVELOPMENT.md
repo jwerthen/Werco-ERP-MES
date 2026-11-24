@@ -521,8 +521,13 @@ can hold (7+ fractional digits, or 3+ integer digits before a `.`) and assert it
 fails on every run rather than one run in a thousand. That helper decides ISO instants only
 (`T` or space separator): output that also carries random tokens, epoch numbers or elapsed
 durations needs its own argument that the needle cannot occur in those. Where the needle's
-shape is fixed (a six-digit PIN), search `strip_iso_instants(text)` instead; on the frontend,
-blank or pin the clock-driven cell rather than dropping the check.
+shape is fixed (a six-digit PIN), search `strip_iso_instants(text)` instead: it removes only
+instants a clock could write (fields in range, the date exists, the same rules as the guard),
+so a secret inside an impossible instant-shaped string is still caught; the one thing it hides
+is a secret written as the fraction of a real instant, which is indistinguishable from a chance
+match. On the frontend, pin the clock (`jest.spyOn(Date, 'now')`, restored after the test; not
+fake timers, which `findBy` / `waitFor` need real) so the clock-driven cell is fixed, and keep
+the check over the whole rendered output rather than dropping or narrowing it.
 
 ### Frontend Testing
 

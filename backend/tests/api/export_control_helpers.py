@@ -697,8 +697,12 @@ _ISO_FIELDS = (
     (17, 19, range(60)),
     (20, 26, None),  # microseconds: every six-digit string is valid, so free digits are any digit
 )
-# The same two separators as the template: whatever the guard decides, the stripper removes.
-_ISO_INSTANT = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?!\d)(?:Z|[+-]\d{2}:\d{2})?")
+# The same two separators as the template. A match is only a CANDIDATE: ``strip_iso_instants``
+# removes it when its fields pass the same ranges and ``_is_real_date`` the guard uses, so the
+# stripper never removes text the guard says no clock can write.
+_ISO_INSTANT = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?!\d)(Z|[+-](\d{2}):(\d{2}))?"
+)
 _DAYS_IN_MONTH = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)  # February at its leap-year most
 
 
@@ -783,15 +787,41 @@ def could_occur_in_iso_timestamp(needle: bytes) -> bool:
     return iso_timestamp_containing(needle) is not None
 
 
-def strip_iso_instants(text: str) -> str:
-    """``text`` with every whole ISO-8601 instant removed, for an absence check whose needle
-    cannot be made timestamp-proof (a six-digit PIN is exactly a microsecond field's shape).
+def _is_real_instant(fields: Tuple[str, ...]) -> bool:
+    """True when the year..second texts are each in the guard's range and form a real date."""
+    values = [int(text) for text in fields]
+    if not all(value in allowed for value, (_, _, allowed) in zip(values, _ISO_FIELDS[:6])):
+        return False
+    return _is_real_date(values[0], values[1], values[2])
 
-    Whole instants with either separator go (``T`` or a space, the two the guard decides).
-    Only complete instants go: a secret written next to one, or a fraction longer than six
-    digits (which no clock writes), stays in the text and is still caught.
+
+def _strip_real_instant(match: "re.Match[str]") -> str:
+    if not _is_real_instant(match.groups()[:6]):
+        return match.group(0)  # no clock writes it: leave it, so it is still searched
+    offset_hours, offset_minutes = match.group(8), match.group(9)
+    if offset_hours is not None and not (int(offset_hours) < 24 and int(offset_minutes) < 60):
+        # The instant is real but the offset is not one: remove the instant, keep the rest.
+        return "<instant>" + match.group(7)
+    return "<instant>"
+
+
+def strip_iso_instants(text: str) -> str:
+    """``text`` with every whole, REAL ISO-8601 instant removed, for an absence check whose
+    needle cannot be made timestamp-proof (a six-digit PIN is exactly a microsecond field's shape).
+
+    Whole instants with either separator go (``T`` or a space, the two the guard decides),
+    with ``Z``, a ``+HH:MM`` / ``-HH:MM`` offset or no suffix, and with 1 to 6 fraction digits
+    or none. Only text a clock could write goes: every field must be in the range
+    ``could_occur_in_iso_timestamp`` uses and the date must exist, so an impossible instant
+    ("2026-13-45T99:99:99.830416Z", February 30th, hour 24, second 60) stays in the text and
+    is still searched. So does a secret written next to an instant, or a fraction longer than
+    six digits (which no clock writes).
+
+    The one trade left: a secret written AS the fraction of a real instant-shaped string
+    ("2026-11-24T15:15:22.830416Z" when the PIN is 830416) is removed with it, because that is
+    exactly what a chance match looks like and the two cannot be told apart from the text.
     """
-    return _ISO_INSTANT.sub("<instant>", text)
+    return _ISO_INSTANT.sub(_strip_real_instant, text)
 
 
 def find_record(payload: Any, *, key: str, value: Any) -> Optional[Dict[str, Any]]:

@@ -180,9 +180,6 @@ const renderWith = (assignments: unknown[]) => {
   );
 };
 
-/** What `formatElapsed` prints ("2208h 15m", "42m"): driven by the real clock, never fixed. */
-const ELAPSED_SHAPE = /^(\d+h )?\d+m$/;
-
 const rowFor = (timeEntryId: number) => document.getElementById(`assign-${timeEntryId}`) as HTMLElement;
 
 /** The bar's inline width — clamped even when the printed percentage is not. */
@@ -203,10 +200,26 @@ beforeEach(() => {
 });
 
 describe('a laser nest row prints its OWN nest fraction, not the job total', () => {
+  // The row also prints the elapsed time since clock_in, computed from Date.now() at mount
+  // (Dashboard's `nowMs`). On the real clock that cell reads "3102h 30m" on some runs, which
+  // holds "102" and would fail the bare-digit check below with nothing wrong. Pinning the
+  // clock one hour after clock_in makes the cell "1h 0m" on every run, so the check runs over
+  // the whole real row and still catches the job total printed anywhere in it, that cell
+  // included. Only Date.now is replaced: timers stay real (findBy/waitFor need them), and
+  // nothing else in the row reads the clock (the overdue dot is a calendar-date comparison).
+  let clockSpy: jest.SpyInstance<number, []> | undefined;
+  afterEach(() => {
+    clockSpy?.mockRestore();
+    clockSpy = undefined;
+  });
+
   it('renders 0/2 (0%) for a nest at zero of two on a job ordered 102 — never 0/102', async () => {
+    const clockIn = '2026-08-24T14:00:00Z';
+    clockSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(clockIn) + 60 * 60 * 1000);
     renderWith([
       makeAssignment({
         timeEntryId: 201,
+        clockIn,
         operation: {
           id: 91,
           operation_number: 'Nest 11',
@@ -224,20 +237,12 @@ describe('a laser nest row prints its OWN nest fraction, not the job total', () 
 
     const row = rowFor(201);
     expect(row).not.toBeNull();
+    // The pin took: the one clock-driven cell is fixed, so the row's text is too.
+    expect(within(row).getByText('1h 0m')).toBeInTheDocument();
     expect(within(row).getByText('0/2 (0%)')).toBeInTheDocument();
     // The exact string the defect printed.
     expect(row.textContent).not.toContain('0/102');
-    // The row also prints the real-clock elapsed time since clock_in ("3102h 30m" on
-    // 2026-12-31 20:30Z, every run from 2027-10-23 to 2027-10-27), so the bare-digit check
-    // runs on a copy with exactly that one cell blanked, and nothing else.
-    const withoutElapsed = row.cloneNode(true) as HTMLElement;
-    const elapsedCells = Array.from(withoutElapsed.querySelectorAll('span')).filter(
-      (span) => span.children.length === 0 && ELAPSED_SHAPE.test(span.textContent ?? '')
-    );
-    expect(elapsedCells).toHaveLength(1);
-    elapsedCells[0].textContent = '';
-    expect(withoutElapsed.textContent).toContain('0/2 (0%)');
-    expect(withoutElapsed.textContent).not.toContain('102');
+    expect(row.textContent).not.toContain('102');
   });
 
   it('gives two nests on the SAME work order their own targets (0/2 and 4/16)', async () => {

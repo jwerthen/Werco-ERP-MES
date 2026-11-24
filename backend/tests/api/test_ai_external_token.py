@@ -2266,3 +2266,44 @@ class TestChanceMatchGuard:
         # A secret glued onto an instant, or a fraction no clock writes, is not hidden.
         assert "830416" in strip_iso_instants("2026-11-24T15:15:22.123456Z830416")
         assert "830416" in strip_iso_instants("2026-11-24T15:15:22.1234567830416Z")
+
+    @pytest.mark.parametrize(
+        "impossible",
+        [
+            "2026-13-45T99:99:99.830416Z",
+            "2026-02-30T10:00:00.830416",
+            "2026-11-24T24:00:00.830416",
+            "2026-11-24T10:00:60.830416",
+            "2026-11-24 10:60:00.830416Z",
+            "2026-02-29T10:00:00.830416Z",
+            "0000-01-01T00:00:00.830416Z",
+        ],
+    )
+    def test_strip_iso_instants_leaves_an_impossible_instant_in_the_text(self, impossible):
+        # The stripper removes only what the guard says a clock can write, so a secret written
+        # inside text that merely has an instant's SHAPE is still searched.
+        assert iso_timestamp_containing(impossible.removesuffix("Z").encode()) is None
+        assert "830416" in strip_iso_instants(f'{{"at":"{impossible}"}}'), impossible
+
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            "2026-11-24T15:15:22.830416Z",
+            "2026-11-24 15:15:22.830416Z",
+            "2026-11-24T15:15:22.830416+05:30",
+            "2026-11-24 15:15:22.830416-06:00",
+            "2026-11-24T15:15:22.830416",
+            "2026-11-24T15:15:22.8Z",
+            "2026-11-24T15:15:22.83+00:00",
+            "2026-11-24 15:15:22.83041",
+            "2026-11-24T15:15:22Z",
+            "2026-11-24 15:15:22",
+            "2028-02-29T23:59:59.999999Z",
+        ],
+    )
+    def test_strip_iso_instants_removes_a_real_instant_in_every_accepted_spelling(self, instant):
+        datetime.fromisoformat(instant.removesuffix("Z"))  # a real instant
+        assert strip_iso_instants(f'{{"at":"{instant}","n":1}}') == '{"at":"<instant>","n":1}', instant
+
+    def test_strip_iso_instants_keeps_an_impossible_offset_but_removes_the_real_instant(self):
+        assert strip_iso_instants("2026-11-24T15:15:22.123456+99:99") == "<instant>+99:99"
