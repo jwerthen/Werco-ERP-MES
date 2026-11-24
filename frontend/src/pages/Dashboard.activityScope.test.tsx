@@ -180,6 +180,9 @@ const renderWith = (assignments: unknown[]) => {
   );
 };
 
+/** What `formatElapsed` prints ("2208h 15m", "42m"): driven by the real clock, never fixed. */
+const ELAPSED_SHAPE = /^(\d+h )?\d+m$/;
+
 const rowFor = (timeEntryId: number) => document.getElementById(`assign-${timeEntryId}`) as HTMLElement;
 
 /** The bar's inline width — clamped even when the printed percentage is not. */
@@ -224,7 +227,17 @@ describe('a laser nest row prints its OWN nest fraction, not the job total', () 
     expect(within(row).getByText('0/2 (0%)')).toBeInTheDocument();
     // The exact string the defect printed.
     expect(row.textContent).not.toContain('0/102');
-    expect(row.textContent).not.toContain('102');
+    // The row also prints the real-clock elapsed time since clock_in ("3102h 30m" on
+    // 2026-12-31 20:30Z, every run from 2027-10-23 to 2027-10-27), so the bare-digit check
+    // runs on a copy with exactly that one cell blanked, and nothing else.
+    const withoutElapsed = row.cloneNode(true) as HTMLElement;
+    const elapsedCells = Array.from(withoutElapsed.querySelectorAll('span')).filter(
+      (span) => span.children.length === 0 && ELAPSED_SHAPE.test(span.textContent ?? '')
+    );
+    expect(elapsedCells).toHaveLength(1);
+    elapsedCells[0].textContent = '';
+    expect(withoutElapsed.textContent).toContain('0/2 (0%)');
+    expect(withoutElapsed.textContent).not.toContain('102');
   });
 
   it('gives two nests on the SAME work order their own targets (0/2 and 4/16)', async () => {

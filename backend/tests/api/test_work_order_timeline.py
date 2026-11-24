@@ -9,6 +9,7 @@ from app.models.time_entry import TimeEntry
 from app.models.user import UserRole
 from app.models.work_order_blocker import WorkOrderBlocker
 from app.services.audit_service import AuditService
+from tests.api.export_control_helpers import could_occur_in_iso_timestamp
 from tests.api.kiosk_test_helpers import make_user, user_headers
 from tests.api.test_scheduling_impact import fixture_job
 
@@ -143,8 +144,8 @@ def test_actor_date_filters_and_private_audit_payloads(client, db_session):
         resource_id=wo.id,
         resource_identifier=wo.work_order_number,
         description='PRIVATE_COST',
-        old_values={'actual_cost': 777777},
-        new_values={'due_date': '2026-10-01', 'actual_cost': 888888},
+        old_values={'actual_cost': 7777777},
+        new_values={'due_date': '2026-10-01', 'actual_cost': 8888888},
         extra_data={'secret': 'DO_NOT_EXPOSE'},
     )
     db_session.commit()
@@ -160,7 +161,10 @@ def test_actor_date_filters_and_private_audit_payloads(client, db_session):
     assert len(body) == 1 and body[0]['evidence'] == 'audit'
     assert body[0]['actor_name'] == user.full_name
     assert body[0]['detail'] == 'Updated due date'
-    assert all(text not in response.text for text in ['PRIVATE_COST', '777777', '888888', 'DO_NOT_EXPOSE'])
+    # Seven-digit markers: a six-digit one ('777777') matched occurred_at's microseconds by chance.
+    secrets = ['PRIVATE_COST', '7777777', '8888888', 'DO_NOT_EXPOSE']
+    assert not [text for text in secrets if could_occur_in_iso_timestamp(text.encode())]
+    assert all(text not in response.text for text in secrets)
     assert (
         timeline(
             client,
@@ -230,7 +234,7 @@ def test_supplemental_quality_telemetry_scopes_parents_and_never_exposes_payload
                 entity_id=ncr.id,
                 work_order_id=wo.id,
                 user_id=foreign_actor.id,
-                event_payload={'private_cost': 987654, 'notes': 'PRIVATE_TELEMETRY_PAYLOAD'},
+                event_payload={'private_cost': 9876543, 'notes': 'PRIVATE_TELEMETRY_PAYLOAD'},
             )
         )
     db_session.commit()
@@ -241,6 +245,7 @@ def test_supplemental_quality_telemetry_scopes_parents_and_never_exposes_payload
     assert telemetry[0]['source_url'] == f'/quality?ncr={ncrs[0].id}'
     assert telemetry[0]['actor_id'] is None and telemetry[0]['actor_name'] is None
     assert 'Supplemental event' in telemetry[0]['detail']
-    assert all(
-        secret not in response.text for secret in ['PRIVATE_TELEMETRY_PAYLOAD', '987654', foreign_actor.full_name]
-    )
+    # Seven digits: a six-digit marker ('987654') could equal an occurred_at microsecond field.
+    secrets = ['PRIVATE_TELEMETRY_PAYLOAD', '9876543', foreign_actor.full_name]
+    assert not [secret for secret in secrets if could_occur_in_iso_timestamp(secret.encode())]
+    assert all(secret not in response.text for secret in secrets)

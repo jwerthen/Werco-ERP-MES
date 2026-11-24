@@ -31,6 +31,7 @@ from app.models.user import User, UserRole
 from app.models.work_center import WorkCenter
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation, WorkOrderStatus
 from app.services.job_costing_service import recalculate_totals
+from tests.api.export_control_helpers import could_occur_in_iso_timestamp
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -273,6 +274,27 @@ def test_status_follows_the_job_cost(client, db_session):
     assert get_by_id(client, admin, wo.id)["job_cost_actuals"]["status"] == "reviewed"
 
 
+# Foreign-tenant amounts: an integer part of five or more digits before the "." means no
+# server-clock instant in the response can contain them by chance (see could_occur_in_iso_timestamp).
+FOREIGN_COST = 98765.4321
+FOREIGN_TOTAL = 197530.8642
+
+
+def foreign_amounts_in(payload) -> list:
+    """Every number anywhere in ``payload`` that equals a foreign-tenant amount."""
+    found, stack = [], [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+        elif isinstance(current, (int, float)) and not isinstance(current, bool):
+            if any(abs(current - amount) < 0.01 for amount in (FOREIGN_COST, FOREIGN_TOTAL)):
+                found.append(current)
+    return found
+
+
 def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(client, db_session):
     """``job_costs.work_order_id`` is unique GLOBALLY, so a legacy row owned by another
     company can occupy this work order's key. The read is scoped on company_id (never the
@@ -283,9 +305,9 @@ def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(cli
     foreign = JobCost(
         company_id=COMPANY_B,
         work_order_id=wo.id,
-        actual_material_cost=999.0,
-        actual_subcontract_cost=999.0,
-        actual_total_cost=1998.0,
+        actual_material_cost=FOREIGN_COST,
+        actual_subcontract_cost=FOREIGN_COST,
+        actual_total_cost=FOREIGN_TOTAL,
     )
     db_session.add(foreign)
     db_session.commit()
@@ -295,7 +317,7 @@ def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(cli
             job_cost_id=foreign.id,
             entry_type=CostEntryType.SUBCONTRACT,
             description="FOREIGN",
-            total_cost=999.0,
+            total_cost=FOREIGN_COST,
             entry_date=date(2026, 11, 2),
         )
     )
@@ -306,9 +328,15 @@ def test_a_foreign_tenant_job_cost_on_this_work_orders_id_is_never_disclosed(cli
     body = get_by_id(client, admin, wo.id)
     assert body["job_cost_actuals"] is None
     assert body["issued_material_cost"] == 0.0
+    assert not foreign_amounts_in(body)
     by_number = client.get(f"/api/v1/work-orders/by-number/{wo.work_order_number}", headers=headers_for(admin))
     assert by_number.json()["job_cost_actuals"] is None
-    assert "999" not in by_number.text and "FOREIGN" not in by_number.text
+    assert not foreign_amounts_in(by_number.json())
+    # Raw text too: catches an amount serialized inside a string. The needles were "999" until a
+    # microsecond field ("...58.499912Z") matched it about one run in 84 with nothing leaked.
+    needles = ("98765.", "197530.")
+    assert not [n for n in needles if could_occur_in_iso_timestamp(n.encode())], "needle fits in a timestamp"
+    assert not [n for n in needles if n in by_number.text] and "FOREIGN" not in by_number.text
 
 
 def test_another_company_cannot_read_this_work_orders_cost(client, db_session):

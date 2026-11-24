@@ -51,7 +51,7 @@ from app.models.audit_log import AuditLog
 from app.models.company import Company
 from app.models.user import User, UserRole
 from app.services.audit_service import AuditService
-from tests.api.export_control_helpers import issue_token
+from tests.api.export_control_helpers import issue_token, strip_iso_instants
 from tests.api.kiosk_test_helpers import BADGE_TOKEN_URL, bearer, ensure_company, kiosk_token_for, make_kiosk_station
 from tests.conftest import TEST_PASSWORD, TEST_PASSWORD_HASH
 
@@ -64,7 +64,9 @@ EMPLOYEE_LOGOUT = "/api/v1/auth/employee-logout"
 PHONE = "/api/v1/users/me/phone"
 XHR = {"X-Requested-With": "XMLHttpRequest"}
 
-# Six digits each, so neither can turn up by chance in an id or a short field we scan.
+# Six digits each, so neither can turn up by chance in an id or a short field we scan. A
+# microsecond field is six digits too: search a body that carries instants through
+# strip_iso_instants.
 PIN = "830416"
 WRONG_PIN = "947215"
 
@@ -302,7 +304,8 @@ class TestRightPin:
         assert response.status_code == 200, response.text
         assert access_claims(response.json()["access_token"])["amr"] == ["badge", "pin"]
         assert refresh_claims(response.json()["refresh_token"])["amr"] == ["badge", "pin"]
-        assert PIN not in response.text
+        # created_at / updated_at carry six-digit microsecond fields, the PIN's own shape.
+        assert PIN not in strip_iso_instants(response.text)
         (row,) = audit_rows(db_session, "EMPLOYEE_LOGIN_SUCCESS")
         assert row.user_id == user.id
         assert row.extra_data["auth_methods"] == ["badge", "pin"]

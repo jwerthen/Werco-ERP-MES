@@ -13,6 +13,8 @@ canary: they are business identifiers the owner allowed through.
 
 from __future__ import annotations
 
+import itertools
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -664,6 +666,82 @@ def contains_canary(raw: bytes, canary: str = CANARY) -> bool:
 
 def contains_numeric_canary(raw: bytes) -> bool:
     return any(marker in raw.lower() for marker in NUMERIC_CANARIES)
+
+
+# ---------------------------------------------------------------------------
+# Absence checks over raw response bytes vs. the clock
+# ---------------------------------------------------------------------------
+# A check that a literal is ABSENT from a serialized response is only sound when nothing
+# else in that response can contain the literal by chance. Every response here carries
+# server-clock instants ("2026-11-24T00:51:37.940123Z"), whose digits change on every run.
+# On 2026-11-24 the needle b"7.94" matched such an instant (seconds 37, microseconds 94....)
+# and failed a redaction test about one run in a thousand although nothing had leaked.
+# The two helpers below make that class of chance match impossible rather than unlikely.
+
+# Every digit slot of an ISO-8601 instant with microseconds, and a real instant to fill
+# the slots a needle does not cover. A shorter fraction, a fraction-less instant, a space
+# separator (``str(datetime)``) or a ``Z`` / offset suffix only removes or renames
+# positions a numeric needle could use, so this one template covers them all.
+_ISO_TEMPLATE = "dddd-dd-ddTdd:dd:dd.dddddd"
+_ISO_BASE = "2026-11-24T15:15:22.227386"
+# Month, day, hour, minute, second: two-digit fields with a range a free digit must respect.
+_ISO_RANGED_FIELDS = ((5, 7), (8, 10), (11, 13), (14, 16), (17, 19))
+_ISO_INSTANT = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?!\d)(?:Z|[+-]\d{2}:\d{2})?")
+
+
+def iso_timestamp_containing(needle: bytes) -> Optional[str]:
+    """A real ``YYYY-MM-DDTHH:MM:SS.ffffffZ`` instant whose text contains ``needle``, or None.
+
+    Constructive: it lays the needle over every offset of the template, fills the digits it
+    does not cover (trying all ten values for a ranged field the needle only half covers)
+    and returns the first string ``datetime.fromisoformat`` accepts. None therefore means
+    no instant of this shape, at any date or time, can contain the needle.
+    """
+    text = needle.decode("ascii")
+    for start in range(len(_ISO_TEMPLATE) - len(text) + 1):
+        slots = _ISO_TEMPLATE[start : start + len(text)]
+        if not all(ch.isdigit() if slot == "d" else ch == slot for slot, ch in zip(slots, text)):
+            continue
+        covered = set(range(start, start + len(text)))
+        overlaid = _ISO_BASE[:start] + text + _ISO_BASE[start + len(text) :]
+        free = [
+            pos
+            for lo, hi in _ISO_RANGED_FIELDS
+            if covered & set(range(lo, hi))
+            for pos in range(lo, hi)
+            if pos not in covered
+        ]
+        for digits in itertools.product("0123456789", repeat=len(free)):
+            candidate = list(overlaid)
+            for pos, digit in zip(free, digits):
+                candidate[pos] = digit
+            instant = "".join(candidate)
+            try:
+                datetime.fromisoformat(instant)
+            except ValueError:
+                continue
+            return instant + "Z"
+    return None
+
+
+def could_occur_in_iso_timestamp(needle: bytes) -> bool:
+    """True when some real ISO-8601 instant with microseconds contains ``needle``.
+
+    Assert this is False for every needle of an absence check over raw response bytes:
+    a needle that fails it would match a timestamp by chance on some run. Seven or more
+    fractional digits, or three or more integer digits before a ``.``, can never fit.
+    """
+    return iso_timestamp_containing(needle) is not None
+
+
+def strip_iso_instants(text: str) -> str:
+    """``text`` with every whole ISO-8601 instant removed, for an absence check whose needle
+    cannot be made timestamp-proof (a six-digit PIN is exactly a microsecond field's shape).
+
+    Only complete instants go: a secret written next to one, or a fraction longer than six
+    digits (which no clock writes), stays in the text and is still caught.
+    """
+    return _ISO_INSTANT.sub("<instant>", text)
 
 
 def find_record(payload: Any, *, key: str, value: Any) -> Optional[Dict[str, Any]]:

@@ -508,6 +508,20 @@ PROMPT_LOCK_BASE_REF=origin/main pytest tests/test_prompt_drift_guard.py --no-co
   bump could land with no line of its own. Examples in that file use `<old> → <new>`; the
   guard fails if any id's next patch, minor or major version already appears there.
 
+#### Absence checks over raw output need chance-proof needles
+
+An assertion that a literal is **absent** from serialized output (`value not in response.content`,
+a rendered row's `textContent`, an audit row dumped to JSON) is only sound if nothing that
+changes between runs can contain the literal: timestamps (`HH:MM:SS.ffffff` holds any 1–6 digit
+run), date-derived numbers, random tokens, elapsed durations. On 2026-11-24 a redaction test
+failed on main with `[b'7.94'] == []` because the quote's `created_at` was `...00:51:37.94...Z`;
+nothing had leaked, but the red job skipped the production deploy. Pick a needle no timestamp
+can hold (7+ fractional digits, or 3+ integer digits before a `.`) and assert it with
+`could_occur_in_iso_timestamp` from `tests/api/export_control_helpers.py`, so a short needle
+fails on every run rather than one run in a thousand. Where the needle's shape is fixed (a
+six-digit PIN), search `strip_iso_instants(text)` instead; on the frontend, blank or pin the
+clock-driven cell rather than dropping the check.
+
 ### Frontend Testing
 
 **Run all tests**
