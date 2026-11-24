@@ -230,8 +230,8 @@ class TestSystemHealthEndpoint:
         assert calib["armed"] is True and calib["schedule"] == "Daily 07:00"
         assert calib["next_run_at"].endswith("Z")
         assert calib["last_run"]["outcome"] == "success" and calib["last_run"]["counts"] == {"due": 1}
-        assert jobs["run_mrp_auto_draft_job"]["armed"] is False
-        assert jobs["run_mrp_auto_draft_job"]["next_run_at"] is None
+        assert jobs["run_mrp_review_job"]["armed"] is False
+        assert jobs["run_mrp_review_job"]["next_run_at"] is None
 
     @pytest.mark.parametrize("headers_fixture", ["manager_headers", "supervisor_headers", "operator_headers"])
     def test_non_admins_are_refused(self, client, request, headers_fixture, monkeypatch):

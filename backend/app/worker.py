@@ -420,7 +420,7 @@ ALL_CRON_JOBS: List[CronJob] = [
     cron(aggregate_ai_learning_job, hour=5, minute=30),  # 5:30 AM daily -- WRITES recommendations/events
     cron(run_oee_auto_calc_job, hour=2, minute=30),  # 2:30 AM daily (previous production day's OEE, P1.2)
     cron(cleanup_runtime_metrics_job, hour=2, minute=15),
-    cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Sunday 2 AM -- physical DELETEs (not audit)
+    cron(cleanup_old_logs_job, weekday=0, hour=2, minute=0),  # Monday 2 AM (weekday 0) -- physical DELETEs (not audit)
     cron(archive_aged_audit_logs_job, day=1, hour=3, minute=0),  # 1st of month, 3 AM -- needs a durable volume
     cron(poll_tracking_job, minute={0, 30}),  # every 30 min (tracking poll fallback) -- carrier egress
     # Notification relay sweeper: every 5 min re-enqueue catalog-mapped events whose
