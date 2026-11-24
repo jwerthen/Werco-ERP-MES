@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 
+{# Renders any catalog event: each section is one event type (catalog label) and each line is the
+   title, body and link the dispatcher queued, which already follow docs/NOTIFICATIONS.md 11.1. #}
 {% block content %}
 <h2>Daily Digest - {{ date }}</h2>
 
@@ -7,32 +9,17 @@
 
 <p>Here's your daily summary of ERP system activity:</p>
 
-{% if events.WO_LATE %}
-<h3 style="color: #dc3545;">Late Work Orders ({{ events.WO_LATE|length }})</h3>
+{% for section in sections %}
+<h3>{{ section.label }} ({{ section['items']|length }})</h3>
 <ul>
-    {% for event in events.WO_LATE %}
-    <li>WO {{ event.wo_number }} - {{ event.days_late }} days late</li>
+    {% for item in section['items'] %}
+    <li>
+        {% if item.link %}<a href="{{ item.link }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}
+        {% if item.body %}<br><span style="color: #475569;">{{ item.body }}</span>{% endif %}
+    </li>
     {% endfor %}
 </ul>
-{% endif %}
-
-{% if events.LOW_STOCK %}
-<h3 style="color: #ffc107;">Low Stock Items ({{ events.LOW_STOCK|length }})</h3>
-<ul>
-    {% for event in events.LOW_STOCK %}
-    <li>{{ event.part_number }} - {{ event.quantity_on_hand }} on hand (reorder at {{ event.reorder_point }})</li>
-    {% endfor %}
-</ul>
-{% endif %}
-
-{% if events.WO_COMPLETED %}
-<h3 style="color: #28a745;">Completed Work Orders ({{ events.WO_COMPLETED|length }})</h3>
-<ul>
-    {% for event in events.WO_COMPLETED %}
-    <li>WO {{ event.wo_number }} - {{ event.part_number }}</li>
-    {% endfor %}
-</ul>
-{% endif %}
+{% endfor %}
 
 {% if base_url %}
 <a href="{{ base_url }}/" class="button">View Dashboard</a>

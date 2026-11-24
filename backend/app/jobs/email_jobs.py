@@ -153,44 +153,93 @@ async def send_email_task(
         db.close()
 
 
+def _digest_sections(items) -> list:
+    """The digest's content, one section per event type in first-seen order: the catalog label and,
+    per queued item, the title, body and an ABSOLUTE link (only when ``FRONTEND_BASE_URL`` is set --
+    a relative href is useless in a mail client). Renders any catalog key, so a new digest event
+    needs no template change. The text is what the dispatcher queued, which already follows
+    docs/NOTIFICATIONS.md section 11.1."""
+    from app.core.config import settings
+    from app.services.notification_catalog import get_entry
+
+    base = (settings.FRONTEND_BASE_URL or "").rstrip("/")
+    sections: dict = {}
+    for item in items:
+        data = item.event_data if isinstance(item.event_data, dict) else {}
+        entry = get_entry(item.event_type)
+        section = sections.setdefault(
+            item.event_type,
+            {"event_key": item.event_type, "label": entry.label if entry else item.event_type, "items": []},
+        )
+        link = data.get("link")
+        absolute = f"{base}{link}" if base and isinstance(link, str) and link.startswith("/") else None
+        title = data.get("title") or section["label"]
+        section["items"].append({"title": title, "body": data.get("body"), "link": absolute})
+    return list(sections.values())
+
+
+def _digest_opted_out(pref) -> bool:
+    """A saved preference row that turned the daily digest off. No row means the defaults: on."""
+    if pref is None:
+        return False
+    if pref.digest_enabled is False:
+        return True
+    return (pref.digest_frequency or "DAILY") != "DAILY"
+
+
 async def send_daily_digest_task():
     """
-    Send daily digest emails to all users
+    Send the daily digest email to every active user with queued digest items.
 
-    Aggregates notifications from the digest queue and sends a single email
+    Recipients are the people the dispatcher queued items for (``DigestQueue``), not only the
+    people who once saved a preference row: no row means the catalog defaults, digest on. A saved
+    row that turned the digest off (``digest_enabled`` false, or a frequency other than DAILY) is
+    honoured. Aggregates the last 24 hours of a user's unprocessed items into one email.
     """
     db = SessionLocal()
     try:
         notification_service = NotificationService(db)
 
-        # Get all users with digest enabled
-        from app.models.notification import NotificationPreference
+        from app.core.config import settings
+        from app.models.notification import DigestQueue, NotificationPreference
         from app.models.user import User
 
-        prefs = (
-            db.query(NotificationPreference)
-            .filter(NotificationPreference.digest_enabled == True, NotificationPreference.digest_frequency == "DAILY")
+        since = datetime.utcnow() - timedelta(days=1)
+        queued = (
+            db.query(DigestQueue.company_id, DigestQueue.user_id)
+            .filter(DigestQueue.processed == False, DigestQueue.created_at >= since)  # noqa: E712
+            .distinct()
+            .order_by(DigestQueue.user_id, DigestQueue.company_id)
             .all()
         )
 
         digest_count = 0
 
-        for pref in prefs:
+        for queued_company_id, queued_user_id in queued:
+            pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == queued_user_id).first()
+            if _digest_opted_out(pref):
+                continue
             user = (
                 db.query(User)
                 .filter(
-                    User.id == pref.user_id,
-                    User.company_id == pref.company_id,
+                    User.id == queued_user_id,
+                    User.company_id == queued_company_id,
                 )
                 .with_for_update()
                 .first()
             )
             if not user or not user.is_active:
                 continue
+            # A badge-only account's placeholder address (or none) cannot receive mail; widening the
+            # digest to everyone with queued items must not start mailing those.
+            from app.services.notification_dispatch import email_deliverable_for_user
+
+            if not email_deliverable_for_user(user):
+                db.rollback()  # release the row lock taken above
+                continue
 
             # Get digest items for this user (last 24 hours)
-            since = datetime.utcnow() - timedelta(days=1)
-            from app.models.notification import DigestQueue, NotificationLog
+            from app.models.notification import NotificationLog
 
             items = (
                 db.query(DigestQueue)
@@ -257,6 +306,8 @@ async def send_daily_digest_task():
             context = {
                 "user": {"first_name": user.first_name, "last_name": user.last_name, "full_name": user.full_name},
                 "events": grouped_events,
+                "sections": _digest_sections(items),
+                "base_url": (settings.FRONTEND_BASE_URL or "").rstrip("/") or None,
                 "date": datetime.utcnow().strftime("%Y-%m-%d"),
             }
             subject = f"Werco ERP Daily Digest - {datetime.utcnow().strftime('%B %d, %Y')}"

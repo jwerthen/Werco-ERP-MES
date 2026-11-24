@@ -18,6 +18,11 @@ source and the AI inventory sensor all name the SAME parts -- a part with no sto
 (out of stock) and one exactly at its point are low; one above it, one with reorder point 0 (even
 with a safety stock and an empty bin) and a deleted one are not. The alert counts parts, names
 none, and links to the filtered Inventory list.
+
+Arrival (step 3): ``stock.low`` has an in-app default so it reaches the bell (``quote.expiring``
+is deliberately unchanged, digest-only). The daily digest mails every active, deliverable user
+with queued items -- no saved preference row means the defaults -- honours a saved opt-out, and
+renders title, body and link for any catalog key.
 """
 
 import asyncio
@@ -213,3 +218,87 @@ def test_every_low_stock_reader_names_the_same_parts(client, db_session: Session
     assert buyer.id in {u.id for u in call["recipients"]}
     for part in (empty_bin, at_point):
         assert part.part_number not in call["title"] + call["body"], "section 11.1: the alert names no part"
+
+
+# ---------------------------------------------------------------------------
+# Low stock reaches the bell; the digest reaches the people it queued for
+# ---------------------------------------------------------------------------
+
+
+def test_stock_low_reaches_the_bell_and_quote_expiring_is_unchanged():
+    from app.services.notification_catalog import CHANNEL_DIGEST, CHANNEL_IN_APP, get_entry
+
+    assert get_entry("stock.low").default_channels == frozenset({CHANNEL_IN_APP, CHANNEL_DIGEST})
+    assert get_entry("quote.expiring").default_channels == frozenset({CHANNEL_DIGEST})
+
+
+def _queue(db: Session, user, event_key: str, *, title: str, body: str, link: str):
+    from datetime import datetime
+
+    from app.models.notification import DigestQueue
+
+    db.add(
+        DigestQueue(
+            company_id=user.company_id,
+            user_id=user.id,
+            event_type=event_key,
+            event_data={"title": title, "body": body, "link": link, "related_type": None, "related_id": None},
+            processed=False,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+
+def test_the_digest_mails_everyone_with_queued_items_and_renders_any_catalog_key(db_session: Session, monkeypatch):
+    import app.jobs.email_jobs as email_jobs
+    from app.core.config import settings
+    from app.models.notification import NotificationPreference
+    from app.services.email_service import email_service
+
+    no_row = _make_user(db_session, company_id=COMPANY_A, department="Purchasing")
+    opted_out = _make_user(db_session, company_id=COMPANY_A, department="Purchasing")
+    db_session.add(
+        NotificationPreference(company_id=COMPANY_A, user_id=opted_out.id, preferences={}, digest_enabled=False)
+    )
+    inactive = _make_user(db_session, company_id=COMPANY_A, department="Purchasing")
+    inactive.is_active = False
+    badge_only = _make_user(db_session, company_id=COMPANY_A, department="Purchasing")
+    badge_only.email = f"badge-{_next()}@users.werco.com"
+    db_session.commit()
+    for user in (no_row, opted_out, inactive, badge_only):
+        _queue(
+            db_session,
+            user,
+            "stock.low",
+            title="Low stock: 3 parts at or below reorder point",
+            body="3 parts are at or below the reorder point; 1 out of stock.",
+            link=links.INVENTORY_LOW_STOCK,
+        )
+    _queue(
+        db_session,
+        no_row,
+        "calibration.overdue",
+        title="OVERDUE: Calibration of Bore gauge 1 is 2 days overdue",
+        body="Was due Mar 10, 2031.",
+        link=links.CALIBRATION_LIST,
+    )
+    monkeypatch.setattr(settings, "FRONTEND_BASE_URL", "https://erp.example.test")
+    monkeypatch.setattr(email_jobs, "SessionLocal", lambda: _UnclosableSession(db_session))
+    sent = []
+
+    async def _smtp(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr(email_jobs.email_service, "send_email", _smtp)
+
+    result = asyncio.run(email_jobs.send_daily_digest_task())
+
+    assert [call["to"] for call in sent] == [no_row.email]
+    assert result["digests_sent"] == 1
+    html = email_service._render_template("daily_digest", sent[0]["context"])
+    assert "Low stock (1)" in html and "Calibration overdue (1)" in html
+    assert "Low stock: 3 parts at or below reorder point" in html
+    assert "1 out of stock" in html
+    assert f'href="https://erp.example.test{links.INVENTORY_LOW_STOCK}"'.replace("&", "&amp;") in html

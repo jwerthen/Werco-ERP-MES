@@ -736,10 +736,12 @@ _ENTRIES: List[CatalogEntry] = [
     CatalogEntry(
         event_key="stock.low",
         label="Low stock",
-        description="Inventory dropped below its reorder point.",
+        description="Parts are at or below their reorder point.",
         category=Category.PURCHASING,
         severity="warning",
-        default_channels=frozenset({CHANNEL_DIGEST}),
+        # In-app so it reaches the bell (it was digest-only, and the digest reached almost no one).
+        # One daily count; recurring, so an unread one is not stacked by the next morning's.
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_DIGEST}),
         recurring=True,
         source_event_types=(),  # cron-driven via dispatch_direct
         departments=("Purchasing", "Inventory"),
