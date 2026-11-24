@@ -2229,6 +2229,22 @@ class TestChanceMatchGuard:
         for needle in (b"7777777", b"98765.", b"2026-13", b"24:00:00"):
             assert iso_timestamp_containing(needle) is None, needle
 
+    @pytest.mark.parametrize(
+        "needle",
+        [b"-31T", b"02-29T", b"2028-02-29", b"12-31T23:59:59.999999", b"9999-", b"0001-01-01", b"1-3"],
+    )
+    def test_date_shaped_needles_are_flagged_at_any_year_month_or_day(self, needle):
+        # The year, month and day are free digits too: a needle the 2026-11 calendar cannot
+        # hold (November has no 31st, 2026 is not a leap year) still occurs on some other date.
+        instant = iso_timestamp_containing(needle)
+        assert instant is not None and could_occur_in_iso_timestamp(needle), needle
+        assert needle in instant.encode()
+        datetime.fromisoformat(instant.removesuffix("Z"))
+
+    @pytest.mark.parametrize("needle", [b"02-30T", b"04-31T", b"0000-", b"-00-", b"-32T", b"T24:", b":60."])
+    def test_impossible_date_and_time_needles_are_not_flagged(self, needle):
+        assert iso_timestamp_containing(needle) is None, needle
+
     def test_strip_iso_instants_removes_whole_instants_only(self):
         text = '{"at":"2026-11-24T15:15:22.830416Z","raw":"2026-11-24 15:15:22.830416","pin":"830416"}'
         stripped = strip_iso_instants(text)
