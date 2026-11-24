@@ -73,7 +73,7 @@ To add stock that isn't tied to a purchase order receipt, click **Receive Invent
 
 1. **Part** — pick it from the list.
 2. **Quantity** and **Location**.
-3. **Lot Number** and **PO Number** if you have them.
+3. **Lot Number** and **PO Number** if you have them, and the **Heat** and **Cert** numbers from the material cert. If the stock lands on a lot that already exists at that location, the lot keeps its own heat and cert: a blank one is filled in, and a different one is noted on the movement.
 4. **Unit Cost** if you know it.
 
 Then click **Receive**.
@@ -91,7 +91,7 @@ To move stock from one shelf to another:
 5. Enter the **Quantity to Transfer**, pick the **To Location**, add any **Notes**.
 6. Click **Transfer**.
 
-You can't transfer more than the available quantity — the box won't let you.
+You can't transfer more than the available quantity — the box won't let you. When the move creates a new row at the destination, that row keeps the batch's heat, cert, PO number and supplier.
 
 ---
 

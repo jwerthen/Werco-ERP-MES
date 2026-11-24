@@ -11572,6 +11572,9 @@ Canonical material-receiving and incoming-inspection endpoints, all under `/rece
 >   optional `lot_number` / `heat_number` / `cert_number` / `serial_numbers` / `notes`, and the
 >   required `reason`. Gate **Admin / Manager / Supervisor** (the receive-tier — the same roles that
 >   `POST /receiving/receive` and post inventory adjustments). Response: the updated `ReceiptResponse`.
+>   A changed `heat_number` / `cert_number` is stored trimmed (blank → NULL) and, on a dock-to-stock
+>   or cleared-hold receipt, carried onto the stock row it placed under the rule in
+>   [Heat number and mill cert on stock rows](#heat-number-and-mill-cert-on-stock-rows).
 > - **Void** — body: `reason` only. Gate **Admin / Manager** (tighter — void is delete authority).
 >   **Terminal: there is no restore** — to redo, re-receive.
 >
@@ -11892,9 +11895,9 @@ environment variables are required.
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
-| POST | `/inventory/receive` | Receive inventory into stock. Optional `ownership` / `owner_customer_id` / `owner_vendor_id` (default company stock) | Admin / Manager / Supervisor |
+| POST | `/inventory/receive` | Receive inventory into stock. Optional `ownership` / `owner_customer_id` / `owner_vendor_id` (default company stock), and `heat_lot` / `cert_number` (see [Heat number and mill cert on stock rows](#heat-number-and-mill-cert-on-stock-rows)) | Admin / Manager / Supervisor |
 | POST | `/inventory/issue` | Issue inventory manually (**deprecated** — see below; **400** if `work_order_number` is sent) | Admin / Manager / Supervisor |
-| POST | `/inventory/transfer` | Transfer inventory between locations. The destination row matches, or is created with, the source row's owner | Admin / Manager / Supervisor |
+| POST | `/inventory/transfer` | Transfer inventory between locations. The destination row matches, or is created with, the source row's owner. A newly created destination row also copies the source's `heat_lot`, `cert_number`, `po_number` and `supplier_id`; an existing one keeps its own | Admin / Manager / Supervisor |
 | POST | `/inventory/adjust` | Adjust inventory | Admin / Manager / Supervisor |
 | POST | `/inventory/items/{item_id}/ownership` | Change who owns one stock row (company, a customer or a supplier). `reason` required; required audit; no ledger row | Admin / Manager / Supervisor |
 | POST | `/inventory/combine/preview` | What folding one SKU onto another would do — blockers, advisories, per-lot lines, the cost delta. **Pure read (writes nothing)** | Admin / Manager / **Supervisor** |
@@ -12393,6 +12396,54 @@ stock rows, tools or PO receipts cannot be hard-deleted**: see [Customers](#cust
 >   unsuitable customer or supplier property to its owner, as the 8.5.3 note requires. Record it on
 >   an NCR and notify the owner outside the system.
 
+#### Heat number and mill cert on stock rows
+
+A stock row (`inventory_items`) has `heat_lot`, `cert_number`, `supplier_id` and `po_number`
+columns. These writes fill them, forward only (existing rows are not backfilled; the lot trace
+covers them through its receipt fallback, see [Traceability](#traceability)):
+
+* **PO receipt to stock.** Every path that puts a PO receipt's material on a stock row stamps the
+  receipt's `heat_number` (as `heat_lot`), its `cert_number`, and the PO's vendor as `supplier_id`:
+  dock-to-stock (`POST /receiving/receive` and each line of `POST /receiving/deliveries`), the
+  inspection accept (`POST /receiving/inspect/{receipt_id}`) and the cleared hold
+  (`POST /receiving/receipt/{receipt_id}/clear-inspection`). Values are stored trimmed, a blank one
+  as NULL. `supplier_id` is the PO's vendor even when that vendor is soft-deleted (the supplier of
+  record). The row's `po_number` still holds the receipt number, as before. Request and response
+  bodies are unchanged.
+* **`POST /inventory/receive`** takes optional `heat_lot` and `cert_number`. A new row stores them.
+* **`POST /inventory/transfer`** copies `heat_lot`, `cert_number`, `po_number` and `supplier_id`
+  onto a destination row it creates, as a combine does. An existing destination row keeps its own.
+
+**Merging into an existing row: the first value wins.** When a PO receipt or `/inventory/receive`
+adds to an existing row (same part, location, lot and owner), a value the row already holds is never
+overwritten; a blank one is filled, and the fill is recorded on the merge's audit row. An incoming
+heat, cert or (PO receipt only) supplier that **differs** from the row's value is not dropped: it is
+named on the `RECEIVE` ledger row's `notes` and in the audit description (for example
+`heat received H-2 differs from stock row heat H-1`), so a lot holding two heats says so on record.
+
+**Correcting a receipt keeps its stock row in step.** On a dock-to-stock or cleared-hold receipt,
+`PATCH /receiving/receipt/{receipt_id}` also writes a changed `heat_number` / `cert_number` to the
+stock row the receipt placed (found through its `RECEIVE` ledger row) when that row's value is
+blank, or when it still equals the receipt's **old** value and no other `RECEIVE` row (another
+receipt, or a manual receive) points at the row. A row another receipt also fed keeps its value, so
+the receipt and the row can then differ deliberately rather than one receipt rewriting another's
+traceability. The change writes an `inventory` audit row `Traceability corrected from receipt
+<number>`. The correction now stores `heat_number` / `cert_number` trimmed, and a cleared value as
+NULL. Limits:
+
+* If the receipt's stock row cannot be resolved (the legacy ambiguity that answers **409** for a
+  quantity change), the heat / cert correction saves to the receipt only.
+* A held receipt has no stock row; the later accept or clear stamps the corrected values.
+* Rows a transfer **created** from the placed row are not rewritten (the transfer ledger row names
+  only its source row, and a destination that existed before the move holds other material too).
+  Instead, rows of the same part, lot and owner at a location the placed row was transferred to that
+  still hold the old value are named on the correction's `receipt` audit row
+  (`extra_data.stale_traceability_stock_row_ids` and the description) for a person to correct. One
+  transfer hop only.
+
+Route gates are unchanged. `GET /inventory/` rows already serialize `heat_lot`, `cert_number`,
+`supplier_id` and `po_number`; the Inventory page shows Heat on its lot rows.
+
 #### Combining two SKUs
 
 A materials-numbering recut can leave two part numbers naming the **same physical article** — the
@@ -12641,8 +12692,36 @@ lot numbers are unreachable.
 
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
-| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history) | Yes |
+| GET | `/traceability/lot/{lot_number}` | Full lot trace (source, usage, as-built genealogy, history). Header carries `heat_lot`, `cert_number` and `certificate_document_id` — see "Heat, cert and the certificate file" below | Yes |
 | GET | `/traceability/serial/{serial_number}` | Serial trace (transactions, work orders, NCRs) | Yes |
+| GET | `/traceability/search?q=` | Lot and serial search (`q` ≥ 1 char). Matches stock-row lot / serial numbers **and** live PO receipts' lot, heat and cert numbers; see below | Yes |
+
+> **Heat, cert and the certificate file.** The lot trace header reads `heat_lot` and `cert_number`
+> from the lot's stock row first. Where the stock row is blank (a row placed before heat and cert
+> rode to stock, or a lot still held for inspection with no row at all), each falls back to the
+> **earliest live PO receipt of this lot for the traced part** that carries a value, and so does
+> `received_date`. Lot numbers are not unique across parts, so the receipts are matched on lot
+> **and** part; `po_number` and `supplier_name` also come only from that part's receipts (before
+> this, any receipt with the same lot number could supply them, another part's included).
+> `supplier_name` falls back to the stock row's `supplier_id` vendor when no receipt names one. For
+> a lot with no stock row and no ledger row, `part_id` / `part_number` / `part_name` come from the
+> receipts when they all name one part; when they name two parts, none is named.
+> `certificate_document_id` (int or null) is the `documents` row id of the mill cert / CoC attached
+> at receiving, from the first such receipt that carries one (stock rows hold no document); it is
+> the same id `GET /receiving/receipt/{receipt_id}` returns, and the Traceability page links the file
+> by it. Each `history` item with `event_type` `received` carries `details.heat_number`,
+> `details.cert_number`, `details.certificate_document_id`, `details.packing_slip` and
+> `details.inspection_status`. Voided receipts stay out of the trace; a soft-deleted vendor is still
+> read through as the supplier of record. Both reads write nothing.
+>
+> **Search.** `GET /traceability/search` returns `{type: "lot" | "serial", number, part_number,
+> part_name, quantity?, location?, heat_lot?, cert_number?}`. Lot hits carry `heat_lot` and
+> `cert_number`; serial hits do not. Besides stock rows, it searches live (not voided) PO receipts on
+> `lot_number`, `heat_number` and `cert_number`, so a mill heat number finds its lot, including a lot
+> still held for inspection: such a receipt-only hit has `quantity` = on hand for that lot **and**
+> part (`0` when none) and `location` null when no stock exists. Lot hits are de-duplicated on
+> (lot, part), stock-row hits first, so a lot number two parts share is listed once per part.
+> Opening a hit still traces by lot number only.
 
 > **As-built genealogy (`consumed_components`).** `GET /traceability/lot/{lot_number}` returns a
 > `consumed_components` array (default `[]`). When the traced lot is a finished-goods lot **produced by
