@@ -454,3 +454,404 @@ class TestProcessSheetGapList:
     def test_other_roles_are_refused(self, client: TestClient, db_session: Session, role):
         user = make_user(db_session, role=role, company_id=1)
         assert client.get(GAPS_URL, headers=user_headers(user)).status_code == status.HTTP_403_FORBIDDEN
+
+
+# --------------------------------------------------------------------------- test-engineer additions
+
+
+def _audit_rows_for_work_orders(db: Session) -> int:
+    db.rollback()
+    return db.query(AuditLog).filter(AuditLog.resource_type == "work_order").count()
+
+
+def _gaps(client: TestClient, headers: dict, **params) -> dict:
+    response = client.get(GAPS_URL, headers=headers, params=params)
+    assert response.status_code == status.HTTP_200_OK, response.text
+    return response.json()
+
+
+def _supplied_gap_wo(client: TestClient, headers: dict, part: Part, rop: RoutingOperation) -> int:
+    response = client.post(
+        CREATE_URL,
+        json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(rop, link=False)]},
+        headers=headers,
+    )
+    assert response.status_code == status.HTTP_201_CREATED, response.text
+    return response.json()["id"]
+
+
+class TestSuppliedCreateRefusalsWriteNothing:
+    def test_one_bad_link_among_good_ones_refuses_everything_and_names_every_bad_row(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, op20 = _two_step_part(db_session)
+        _other, _s2, other_op10, other_op20 = _two_step_part(db_session)
+        wo_before = _wo_count(db_session)
+        audit_before = _audit_rows_for_work_orders(db_session)
+        steps_before = db_session.query(WOOperationStep).count()
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 1,
+                "operations": [
+                    _row(op10),
+                    _row(other_op10, sequence=20, operation_number="20"),
+                    _row(other_op20, sequence=30, operation_number="30"),
+                ],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_409_CONFLICT, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "ROUTING_OPERATION_UNMATCHED"
+        assert [(p["operation_number"], p["routing_operation_id"]) for p in detail["operations"]] == [
+            ("20", other_op10.id),
+            ("30", other_op20.id),
+        ]
+        assert "20, 30" in detail["detail"]
+        assert _wo_count(db_session) == wo_before
+        assert _audit_rows_for_work_orders(db_session) == audit_before
+        assert db_session.query(WOOperationStep).count() == steps_before, "the good row's snapshot rolled back too"
+
+    def test_a_foreign_link_writes_no_audit_row(self, client: TestClient, auth_headers: dict, db_session: Session):
+        ensure_company(db_session, 2)
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        _fp, _fs, foreign_op10, _f20 = _two_step_part(db_session, company_id=2)
+        audit_before = _audit_rows_for_work_orders(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 1,
+                "operations": [_row(foreign_op10, work_center_id=op10.work_center_id)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_409_CONFLICT
+        # The foreign row's sheet is never snapshotted and never named back to the caller.
+        assert "sheet" not in json.dumps(response.json()["detail"]["operations"])
+        assert _audit_rows_for_work_orders(db_session) == audit_before
+
+    def test_an_unreleased_sheet_on_a_linked_row_writes_no_audit_row(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        sheet = _sheet(db_session, sheet_status="draft")
+        part = _make_routed_part_with_sheet(db_session, f"SUP-{_n():04d}", sheet)
+        op10 = _routing_op(db_session, part)
+        audit_before = _audit_rows_for_work_orders(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op10)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert _audit_rows_for_work_orders(db_session) == audit_before
+
+    def test_an_operator_cannot_create_with_linked_rows(self, client: TestClient, db_session: Session):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        operator = make_user(db_session, role=UserRole.OPERATOR, company_id=1)
+        before = _wo_count(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op10)]},
+            headers=user_headers(operator),
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert _wo_count(db_session) == before
+
+    def test_a_non_positive_link_is_a_422(self, client: TestClient, auth_headers: dict, db_session: Session):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        row = _row(op10)
+        row["routing_operation_id"] = 0
+        response = client.post(
+            CREATE_URL, json={"part_id": part.id, "quantity_ordered": 1, "operations": [row]}, headers=auth_headers
+        )
+        assert response.status_code == 422
+
+
+class TestSuppliedCreateEdgeCases:
+    def test_two_rows_linked_to_one_routing_operation_each_get_the_sheet(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Pins today's behaviour: a split step (same routing op twice) carries the checks on
+        both rows rather than silently dropping them from either."""
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 4,
+                "operations": [_row(op10), _row(op10, sequence=20, operation_number="20", name="Machine (2nd)")],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        wo_id = response.json()["id"]
+        assert _steps_for(db_session, wo_id) == {10: 1, 20: 1}
+        extra = _creation_extra(db_session, wo_id)
+        assert extra["linked_routing_operation_ids"] == [op10.id, op10.id]
+        assert extra["removed_process_sheet_steps"] == []
+
+    def test_a_hand_added_row_beside_a_linked_row_snapshots_only_the_linked_one(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, op20 = _two_step_part(db_session)
+        hand_added = {
+            "sequence": 20,
+            "operation_number": "20",
+            "name": "Hand-added wash",
+            "work_center_id": op10.work_center_id,
+        }
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": part.id,
+                "quantity_ordered": 1,
+                "operations": [_row(op10), hand_added, _row(op20, sequence=30, operation_number="30")],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        assert _steps_for(db_session, response.json()["id"]) == {10: 1, 20: 0, 30: 0}
+
+    def test_the_job_parts_own_id_as_component_is_accepted_for_its_own_step(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op10, component_part_id=part.id)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        assert _steps_for(db_session, response.json()["id"]) == {10: 1}
+
+
+def _assembly_with_own_routing(db: Session):
+    """Assembly whose own released routing lists an inspection BEFORE a weld step, plus a
+    sheeted component: the routed create puts components first and inspection last."""
+    assembly, component, sheet, comp_op = _assembly_with_sheeted_component(db)
+    routing = Routing(part_id=assembly.id, status="released", is_active=True, company_id=1)
+    db.add(routing)
+    db.flush()
+    for seq, name, inspect in [(10, "Final inspection", True), (20, "Weld", False), (30, "Retired", False)]:
+        db.add(
+            RoutingOperation(
+                routing_id=routing.id,
+                sequence=seq,
+                operation_number=f"A{seq}",
+                name=name,
+                work_center_id=comp_op.work_center_id,
+                run_hours_per_unit=0.1,
+                is_inspection_point=inspect,
+                is_active=name != "Retired",
+                company_id=1,
+            )
+        )
+    db.commit()
+    return assembly, component, sheet, comp_op
+
+
+class TestPreviewMatchesTheRoutedCreate:
+    """The preview and the routed create are two implementations of one ordering rule
+    (``released_routing_steps`` mirrors the create loops). Pin them together."""
+
+    def _routed_ops(self, client, headers, db, part_id: int) -> list:
+        response = client.post(CREATE_URL, json={"part_id": part_id, "quantity_ordered": 2}, headers=headers)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        ops = (
+            db.query(WorkOrderOperation)
+            .filter(WorkOrderOperation.work_order_id == response.json()["id"])
+            .order_by(WorkOrderOperation.sequence)
+            .all()
+        )
+        return [(op.sequence, op.operation_number, op.name) for op in ops]
+
+    def _preview(self, client, headers, part_id: int) -> list:
+        response = client.get(PREVIEW_URL.format(part_id=part_id), headers=headers, params={"quantity": 2})
+        assert response.status_code == status.HTTP_200_OK, response.text
+        return response.json()["operations_preview"]
+
+    def test_assembly_with_own_routing(self, client: TestClient, auth_headers: dict, db_session: Session):
+        assembly, component, _sheet_row, comp_op = _assembly_with_own_routing(db_session)
+        preview = self._preview(client, auth_headers, assembly.id)
+        routed = self._routed_ops(client, auth_headers, db_session, assembly.id)
+        assert [(r["sequence"], r["operation_number"], r["name"]) for r in preview] == routed
+        assert [r["name"] for r in preview][-1] == "Final inspection", "inspection last"
+        assert "Retired" not in [r["name"] for r in preview]
+        assert preview[0]["routing_operation_id"] == comp_op.id
+        assert preview[0]["component_part_id"] == component.id
+
+    def test_simple_part(self, client: TestClient, auth_headers: dict, db_session: Session):
+        part, _s, _op10, _op20 = _two_step_part(db_session)
+        preview = self._preview(client, auth_headers, part.id)
+        routed = self._routed_ops(client, auth_headers, db_session, part.id)
+        assert [(r["sequence"], r["operation_number"], r["name"]) for r in preview] == routed
+
+    def test_supplying_every_preview_row_back_equals_the_routed_snapshot(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """What the form does: echo every preview row with its link. Same checks as routed."""
+        assembly, _component, _sheet_row, _comp_op = _assembly_with_own_routing(db_session)
+        preview = self._preview(client, auth_headers, assembly.id)
+        operations = [
+            {
+                "sequence": r["sequence"],
+                "operation_number": r["operation_number"],
+                "name": r["name"],
+                "work_center_id": r["work_center_id"],
+                "component_part_id": r["component_part_id"],
+                "component_quantity": r["component_quantity"],
+                "routing_operation_id": r["routing_operation_id"],
+            }
+            for r in preview
+        ]
+        supplied = client.post(
+            CREATE_URL,
+            json={"part_id": assembly.id, "quantity_ordered": 2, "operations": operations},
+            headers=auth_headers,
+        )
+        assert supplied.status_code == status.HTTP_201_CREATED, supplied.text
+        routed = client.post(CREATE_URL, json={"part_id": assembly.id, "quantity_ordered": 2}, headers=auth_headers)
+        assert _steps_for(db_session, supplied.json()["id"]) == _steps_for(db_session, routed.json()["id"])
+        assert _creation_extra(db_session, supplied.json()["id"])["removed_process_sheet_steps"] == []
+
+    def test_preview_of_another_companys_part_is_404(self, client: TestClient, auth_headers: dict, db_session: Session):
+        ensure_company(db_session, 2)
+        foreign_part, _s, _op10, _op20 = _two_step_part(db_session, company_id=2)
+        response = client.get(PREVIEW_URL.format(part_id=foreign_part.id), headers=auth_headers)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestProcessSheetGapListFilters:
+    def test_limit_caps_items_but_total_counts_everything(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        ids = [_supplied_gap_wo(client, auth_headers, part, op10) for _ in range(3)]
+        body = _gaps(client, auth_headers, limit=2)
+        mine = [i for i in ids if i in {item["work_order_id"] for item in _gaps(client, auth_headers)["items"]}]
+        assert len(mine) == 3
+        assert len(body["items"]) == 2 and body["total"] >= 3
+        assert client.get(GAPS_URL, headers=auth_headers, params={"limit": 0}).status_code == 422
+        assert client.get(GAPS_URL, headers=auth_headers, params={"limit": 501}).status_code == 422
+
+    def test_soft_deleted_and_laser_work_orders_are_left_out(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        deleted = _supplied_gap_wo(client, auth_headers, part, op10)
+        laser = _supplied_gap_wo(client, auth_headers, part, op10)
+        kept = _supplied_gap_wo(client, auth_headers, part, op10)
+        db_session.query(WorkOrder).filter(WorkOrder.id == deleted).update({"is_deleted": True})
+        db_session.query(WorkOrder).filter(WorkOrder.id == laser).update({"work_order_type": "laser_cutting"})
+        db_session.commit()
+        listed = {item["work_order_id"] for item in _gaps(client, auth_headers)["items"]}
+        assert kept in listed
+        assert deleted not in listed and laser not in listed
+
+    def test_ordered_by_due_date_with_undated_last(self, client: TestClient, auth_headers: dict, db_session: Session):
+        from datetime import date
+
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        undated = _supplied_gap_wo(client, auth_headers, part, op10)
+        later = _supplied_gap_wo(client, auth_headers, part, op10)
+        sooner = _supplied_gap_wo(client, auth_headers, part, op10)
+        db_session.query(WorkOrder).filter(WorkOrder.id == undated).update({"due_date": None})
+        db_session.query(WorkOrder).filter(WorkOrder.id == later).update({"due_date": date(2031, 6, 1)})
+        db_session.query(WorkOrder).filter(WorkOrder.id == sooner).update({"due_date": date(2031, 1, 1)})
+        db_session.commit()
+        order = [
+            i
+            for i in (item["work_order_id"] for item in _gaps(client, auth_headers)["items"])
+            if i in {undated, later, sooner}
+        ]
+        assert order == [sooner, later, undated]
+
+    def test_a_job_holding_some_sheet_steps_is_not_listed(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        """Documented default: the list is 'holds NO snapshotted step', not 'holds fewer'."""
+        part, _s, op10, op20 = _two_step_part(db_session)
+        second = _sheet(db_session)
+        op20.process_sheet_id = second.id
+        db_session.commit()
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op10), _row(op20, link=False)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        wo_id = response.json()["id"]
+        assert _steps_for(db_session, wo_id) == {10: 1, 20: 0}
+        assert wo_id not in {item["work_order_id"] for item in _gaps(client, auth_headers)["items"]}
+
+    def test_an_assembly_whose_component_sheet_was_dropped_is_listed(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        assembly, component, sheet, comp_op = _assembly_with_sheeted_component(db_session)
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": assembly.id,
+                "quantity_ordered": 1,
+                "operations": [_row(comp_op, link=False, component_part_id=component.id)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        items = {item["work_order_id"]: item for item in _gaps(client, auth_headers)["items"]}
+        expected = items[response.json()["id"]]["expected_process_sheet_steps"]
+        assert [(s["component_part_id"], s["sheet_number"]) for s in expected] == [(component.id, sheet.sheet_number)]
+
+    def test_a_job_on_a_part_with_no_sheets_is_not_listed(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _s, op10, op20 = _two_step_part(db_session)
+        op10.process_sheet_id = None
+        db_session.commit()
+        wo_id = _supplied_gap_wo(client, auth_headers, part, op20)
+        assert wo_id not in {item["work_order_id"] for item in _gaps(client, auth_headers)["items"]}
+
+
+class TestProcessSheetGapListCredentials:
+    def test_an_api_token_reads_the_list_and_writes_nothing(
+        self, client: TestClient, admin_headers: dict, auth_headers: dict, test_user, db_session: Session
+    ):
+        part, _s, op10, _op20 = _two_step_part(db_session)
+        gap = _supplied_gap_wo(client, auth_headers, part, op10)
+        issued = client.post(
+            "/api/v1/api-tokens/", json={"user_id": test_user.id, "label": "gap probe"}, headers=admin_headers
+        )
+        assert issued.status_code == 201, issued.text
+        headers = {"Authorization": f"Bearer {issued.json()['token']}", "X-Requested-With": "XMLHttpRequest"}
+        db_session.expire_all()
+        audit_before = db_session.query(AuditLog).count()
+        assert gap in {item["work_order_id"] for item in _gaps(client, headers)["items"]}
+        db_session.expire_all()
+        assert db_session.query(AuditLog).count() == audit_before
+
+    def test_a_kiosk_scoped_token_is_refused(self, client: TestClient, test_user, db_session: Session):
+        from app.core.security import create_access_token
+
+        token = create_access_token(subject=test_user.id, company_id=1, scope="kiosk")
+        headers = {"Authorization": f"Bearer {token}", "X-Requested-With": "XMLHttpRequest"}
+        assert client.get(GAPS_URL, headers=headers).status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.MANAGER, UserRole.QUALITY])
+    def test_allowed_roles(self, client: TestClient, db_session: Session, role):
+        user = make_user(db_session, role=role, company_id=1)
+        assert client.get(GAPS_URL, headers=user_headers(user)).status_code == status.HTTP_200_OK
+
+    def test_the_gap_list_is_a_read_only_mcp_tool(self):
+        """A pure read is an ordinary agent tool (not people-only), and it stays read-only."""
+        from app.main import app
+        from app.mcp.catalog import build_catalog
+        from app.mcp.convenience import CONVENIENCE_TOOL_NAMES, SHADOWED_OPERATIONS
+
+        tools = build_catalog(app.openapi(), shadowed=SHADOWED_OPERATIONS, reserved_names=CONVENIENCE_TOOL_NAMES)
+        by_route = {(tool.method, tool.path): tool for tool in tools}
+        tool = by_route[("GET", GAPS_URL)]
+        assert tool.name == "list_process_sheet_gaps"
+        assert tool.query_params == ("limit",)

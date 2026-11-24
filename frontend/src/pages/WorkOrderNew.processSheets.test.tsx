@@ -381,3 +381,163 @@ describe('a refused link is shown, never dropped', () => {
     expect(screen.getAllByLabelText('Operation name')).toHaveLength(2);
   });
 });
+
+// ------------------------------------------------------------------ test-engineer additions
+
+const RESTORED_FORM = {
+  part_id: 1,
+  quantity_ordered: 1,
+  priority: 5,
+  customer_name: '',
+  customer_po: '',
+  unit_number: '',
+  due_date: '',
+  notes: '',
+};
+
+function restoredRow(sequence: number, name: string, routingOperationId: number, extra: Record<string, unknown> = {}) {
+  return {
+    sequence,
+    operation_number: String(sequence),
+    name,
+    work_center_id: 5,
+    work_center_name: 'Weld Cell',
+    setup_time_hours: 0,
+    run_time_hours: 0,
+    fromRouting: true,
+    routing_operation_id: routingOperationId,
+    ...extra,
+  };
+}
+
+function restoreDraft(operations: Record<string, unknown>[]) {
+  act(() => {
+    mockDraft.restore?.({
+      form: RESTORED_FORM,
+      operations,
+      operationsOverridden: true,
+      showManualEntry: true,
+      serialsText: '',
+    });
+  });
+}
+
+describe('routed rows: what is and is not sent', () => {
+  it('an untouched routed part sends no operations, so the server runs the routed snapshot', async () => {
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations()).toEqual([]);
+  });
+
+  it('a quantity change keeps every routing link and the sheet chip', async () => {
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.change(screen.getByLabelText(/^Quantity/), { target: { value: '12' } });
+    expect(screen.getByText('Process sheet PS-104')).toBeInTheDocument();
+    fireEvent.change(screen.getAllByLabelText('Operation name')[0], { target: { value: 'Cut (revised)' } });
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([30, 31]);
+    expect((mockedApi.createWorkOrder.mock.calls[0][0] as { quantity_ordered: number }).quantity_ordered).toBe(12);
+  });
+
+  it("shows a PROCESS_SHEET_UNAVAILABLE refusal's own text, not [object Object]", async () => {
+    mockedApi.createWorkOrder.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: 'PROCESS_SHEET_UNAVAILABLE',
+            detail: 'Process sheet PS-104 has no released revision; release it before creating this work order.',
+            operation: 'Weld',
+            sheet_number: 'PS-104',
+          },
+        },
+      },
+    });
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.change(screen.getAllByLabelText('Operation name')[1], { target: { value: 'Weld (revised)' } });
+    fireEvent.click(submitButton());
+    expect(await screen.findByText(/PS-104 has no released revision/)).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+    // Not a link refusal: no row is marked stale.
+    expect(screen.queryByTestId('wo-stale-routing-links')).not.toBeInTheDocument();
+  });
+});
+
+describe('restored drafts', () => {
+  it('a draft whose links are all current is not flagged and creates with its links', async () => {
+    await renderPage();
+    restoreDraft([
+      restoredRow(10, 'Cut', 30),
+      restoredRow(20, 'Weld (my edit)', 31, { process_sheet_id: 7, process_sheet_number: 'PS-104' }),
+    ]);
+    await waitFor(() => expect(mockedApi.previewWorkOrderOperations).toHaveBeenCalledWith(1, 1));
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    expect(screen.queryByTestId('wo-stale-routing-links')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wo-missing-sheet-steps')).not.toBeInTheDocument();
+
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => [op.name, op.routing_operation_id])).toEqual([
+      ['Cut', 30],
+      ['Weld (my edit)', 31],
+    ]);
+  });
+
+  it('blocks Create until a failed routing check is retried, then allows it', async () => {
+    mockedApi.previewWorkOrderOperations.mockRejectedValueOnce(new Error('Offline'));
+    await renderPage();
+    restoreDraft([restoredRow(10, 'Cut', 30), restoredRow(20, 'Weld', 31)]);
+
+    const retry = await screen.findByRole('button', { name: 'Retry routing check' });
+    fireEvent.click(submitButton());
+    await screen.findByText(/have not been checked against the released routing yet/);
+    expect(mockedApi.createWorkOrder).not.toHaveBeenCalled();
+
+    fireEvent.click(retry);
+    // The retry is in flight until the fresh preview lands; then the links are checked.
+    await waitFor(() => expect(mockedApi.previewWorkOrderOperations).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(screen.queryByRole('button', { name: 'Retry routing check' })).not.toBeInTheDocument();
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([30, 31]);
+  });
+
+  it('Reload from released routing asks first, then replaces the stale rows with current links', async () => {
+    await renderPage();
+    restoreDraft([restoredRow(10, 'Cut', 30), restoredRow(20, 'Old weld', 99)]);
+    const stale = await screen.findByTestId('wo-stale-routing-links');
+
+    fireEvent.click(within(stale).getByRole('button', { name: 'Reload from released routing' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Your edits to the operations are discarded/)).toBeInTheDocument();
+    // Cancel keeps the rows exactly as restored.
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByTestId('wo-stale-routing-links')).toBeInTheDocument();
+    expect(mockedApi.getRoutingByPart).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(screen.getByTestId('wo-stale-routing-links')).getByRole('button', {
+        name: 'Reload from released routing',
+      })
+    );
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Reload operations' }));
+    await waitFor(() => expect(mockedApi.getRoutingByPart).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(screen.queryByTestId('wo-stale-routing-links')).not.toBeInTheDocument());
+    expect(screen.getByText('Process sheet PS-104')).toBeInTheDocument();
+
+    fireEvent.change(screen.getAllByLabelText('Operation name')[1], { target: { value: 'Weld (revised)' } });
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([30, 31]);
+  });
+});
