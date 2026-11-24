@@ -6234,11 +6234,6 @@ class ApiService {
     return response.data;
   }
 
-  async createCompany(data: any): Promise<any> {
-    const response = await this.api.post('/platform/companies', data);
-    return response.data;
-  }
-
   async getCompanyDetail(companyId: number): Promise<any> {
     const response = await this.api.get(`/platform/companies/${companyId}`);
     return response.data;

@@ -1,11 +1,12 @@
 /**
  * Company-creation client boundary.
  *
- * Werco is the only company on this system (owner decision 2026-11-23), so the
- * unauthenticated `POST /companies/register` self-registration route, its page
- * and its client method were deleted. The one company-creation call the SPA keeps
- * is the platform-admin `createCompany`, which must post to `/platform/companies`
- * and nowhere else.
+ * Werco is the only company on this system (owner decisions 2026-11-23), so both
+ * company-creation doors are gone: the unauthenticated `POST /companies/register`
+ * self-registration route and the platform-admin `POST /platform/companies` route,
+ * along with their pages, modal and client methods. The only way a company is
+ * created is the server-side empty-install bootstrap, which the SPA never calls
+ * as "create a company". This file pins that the client exposes no creation call.
  *
  * axios is mocked at the module boundary (same pattern as api.duplicateWorkOrder.test.ts).
  */
@@ -35,21 +36,21 @@ jest.mock('axios', () => {
 import api from './api';
 
 describe('company creation client', () => {
-  beforeEach(() => {
-    mockPost.mockReset();
-  });
-
   it('no longer exposes the deleted public self-registration call', () => {
     expect((api as unknown as Record<string, unknown>).registerCompany).toBeUndefined();
   });
 
-  it('creates a company only through the platform-admin route', async () => {
-    mockPost.mockResolvedValue({ status: 200, data: { id: 2, name: 'Example Fab Co' }, headers: {} });
+  it('no longer exposes the deleted platform-admin company creation call', () => {
+    expect((api as unknown as Record<string, unknown>).createCompany).toBeUndefined();
+  });
 
-    const result = await api.createCompany({ name: 'Example Fab Co' });
+  it('still lists platform companies with a GET, never a POST', async () => {
+    mockGet.mockResolvedValue({ status: 200, data: [{ id: 1, name: 'Example Fab Co' }], headers: {} });
 
-    expect(mockPost).toHaveBeenCalledTimes(1);
-    expect(mockPost).toHaveBeenCalledWith('/platform/companies', { name: 'Example Fab Co' });
-    expect(result).toEqual({ id: 2, name: 'Example Fab Co' });
+    const result = await api.getPlatformCompanies();
+
+    expect(mockGet).toHaveBeenCalledWith('/platform/companies');
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(result).toEqual([{ id: 1, name: 'Example Fab Co' }]);
   });
 });
