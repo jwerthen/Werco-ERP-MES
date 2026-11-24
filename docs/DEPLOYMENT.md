@@ -1355,11 +1355,9 @@ sudo certbot --nginx -d werco-erp.yourdomain.com
    details. After bootstrap, normal incremental `alembic upgrade head` is the
    standard path.
 
-3. **Set up automatic backups:**
-   ```bash
-   # Add to crontab
-   0 2 * * * /usr/bin/python3 /opt/werco-erp/scripts/backup_database.py >> /var/log/werco-erp/backup.log 2>&1
-   ```
+3. **Backups:** see [DATABASE_BACKUP.md](DATABASE_BACKUP.md). Production runs on
+   Supabase, which takes the database backups; the old `scripts/backup_database.py`
+   cron is retired.
 
 ## Monitoring & Logging
 
@@ -1413,24 +1411,9 @@ Create `/etc/logrotate.d/werco-erp`:
 
 ## Backup Strategy
 
-### Automatic Backups
-
-```bash
-# Daily database backup at 2 AM
-0 2 * * * /usr/bin/python3 /opt/werco-erp/scripts/backup_database.py
-
-# Weekly full backup on Sundays at 3 AM
-0 3 * * 0 /usr/bin/rsync -avz /opt/werco-erp /backups/werco-erp-weekly
-
-# Monthly cleanup of old backups
-0 4 1 * * /usr/bin/find /backups -name "*.sql.gz" -mtime +30 -delete
-```
-
-### Backup Locations
-
-- **Local**: `/backups/`
-- **S3**: Configured via AWS credentials
-- **Retention**: 30 days
+Production's database is Supabase Postgres, backed up by Supabase. Backup options, the
+restore drill, and what a database restore does not bring back (uploaded documents,
+Redis) are in [DATABASE_BACKUP.md](DATABASE_BACKUP.md).
 
 ## Scaling Considerations
 

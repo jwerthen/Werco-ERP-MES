@@ -2319,8 +2319,8 @@ class ApiService {
     this.invalidateDashboardCache();
   }
 
-  async getSetupHealth() {
-    const response = await this.api.get('/setup/health');
+  async getSetupHealth(): Promise<import('../types/setup').SetupHealthResponse> {
+    const response = await this.api.get<import('../types/setup').SetupHealthResponse>('/setup/health');
     return response.data;
   }
 

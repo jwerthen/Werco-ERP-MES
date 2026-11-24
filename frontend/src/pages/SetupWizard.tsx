@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { EmptyState, ErrorState } from '../components/ui';
+import { StorageStatusPanel } from '../components/setup/StorageStatusPanel';
+import type { SetupHealthResponse, SetupStep } from '../types/setup';
 import {
   ArrowPathIcon,
   ArrowRightIcon,
@@ -11,32 +13,6 @@ import {
   RocketLaunchIcon,
   SparklesIcon,
 } from '@heroicons/react/24/outline';
-
-interface SetupStep {
-  key: string;
-  label: string;
-  status: 'complete' | 'missing';
-  count: number;
-  required_count: number;
-  href: string;
-  reason?: string;
-}
-
-interface MasterDataIssue {
-  key: string;
-  severity: 'high' | 'medium' | 'low';
-  title: string;
-  detail: string;
-  count: number;
-  href: string;
-}
-
-interface SetupHealth {
-  progress: number;
-  counts: Record<string, number>;
-  steps: SetupStep[];
-  issues: MasterDataIssue[];
-}
 
 const fallbackSteps: SetupStep[] = [
   {
@@ -97,7 +73,7 @@ const fallbackSteps: SetupStep[] = [
 
 export default function SetupWizard() {
   const request = useRef(0);
-  const [health, setHealth] = useState<SetupHealth | null>(null);
+  const [health, setHealth] = useState<SetupHealthResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
 
@@ -336,6 +312,8 @@ export default function SetupWizard() {
           />
         )}
       </div>
+
+      <StorageStatusPanel storage={health.storage} stale={loadError} />
     </div>
   );
 }

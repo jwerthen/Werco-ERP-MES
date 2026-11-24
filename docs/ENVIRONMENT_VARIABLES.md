@@ -730,6 +730,12 @@ PO source documents** — go through the shared storage service
 > are **not** copied to the bucket automatically; on hosts where local files are already
 > ephemeral, only documents written after the switch are durable.
 
+> **Which backend is the API actually using?** The Setup Wizard's **Document Storage**
+> panel (`/setup`) and `GET /health/detailed` → `checks.storage` report the API process's
+> backend and, for `local`, whether `UPLOAD_DIR` sits on a mounted volume. Neither
+> describes the worker. See [API.md → Detailed health](API.md#detailed-health-document-storage)
+> and [DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents).
+
 **Railway bucket example** (S3-compatible; the CLI provides the endpoint + keys):
 ```bash
 railway bucket create werco-erp-documents
