@@ -68,6 +68,8 @@ from app.schemas.labor_review import (
 )
 from app.services.audit_service import AuditService
 from app.services.completion_cost_service import compute_and_store_actual_cost
+from app.services.job_costing_access_service import job_cost_query
+from app.services.job_costing_access_service import snapshot as job_cost_snapshot
 from app.services.job_costing_service import recompute_from_time_entries
 from app.services.labor_cost_service import is_labor_cost_rollup_enabled
 from app.services.production_calendar import (
@@ -350,6 +352,23 @@ def _base_query(db: Session, company_id: int):
     )
 
 
+def _approver_names(db: Session, company_id: int, approver_ids: set) -> Dict[int, str]:
+    """Names of the approvers: this company's users, plus a platform admin or superuser who
+    approved while switched into it (their home company differs) -- the same widening the
+    job-cost creator join uses (``job_costing_access_service.cost_entry_query``)."""
+    if not approver_ids:
+        return {}
+    approvers = (
+        db.query(User)
+        .filter(
+            User.id.in_(approver_ids),
+            or_(User.company_id == company_id, User.role == UserRole.PLATFORM_ADMIN, User.is_superuser.is_(True)),
+        )
+        .all()
+    )
+    return {approver.id: approver.full_name for approver in approvers}
+
+
 def _attributed(
     db: Session,
     company_id: int,
@@ -408,10 +427,7 @@ def list_time_entries(
     overlapping = _overlapping_ids((entry for entry, _day, _shift in attributed), now)
 
     approver_ids = {entry.approved_by for entry, _d, _s in attributed if entry.approved_by is not None}
-    approver_names: Dict[int, str] = {}
-    if approver_ids:
-        for approver in tenant_query(db, User, company_id).filter(User.id.in_(approver_ids)).all():
-            approver_names[approver.id] = approver.full_name
+    approver_names = _approver_names(db, company_id, approver_ids)
 
     rows: List[LaborReviewEntry] = []
     for entry, day, shift_name in attributed:
@@ -441,15 +457,17 @@ def list_time_entries(
                 approver_names=approver_names,
             )
         )
-    if flag is not None:
-        rows = [row for row in rows if flag in row.flags]
-    if flagged_only:
-        rows = [row for row in rows if row.flags]
-
+    # Chip counts are per-flag totals over the other filters, counted BEFORE the flag filters
+    # narrow the rows, so clicking one chip does not turn every other chip into "both flags".
     flag_counts: Dict[str, int] = {}
     for row in rows:
         for value in row.flags:
             flag_counts[value] = flag_counts.get(value, 0) + 1
+
+    if flag is not None:
+        rows = [row for row in rows if flag in row.flags]
+    if flagged_only:
+        rows = [row for row in rows if row.flags]
 
     # Newest first; ties by id so paging is stable.
     rows.sort(key=lambda row: (_naive_utc(row.clock_in), row.id), reverse=True)
@@ -486,11 +504,7 @@ def entry_row(db: Session, company_id: int, viewer: User, entry: TimeEntry, *, n
         .all()
     )
     overlapping = _overlapping_ids(siblings, now)
-    approver_names: Dict[int, str] = {}
-    if entry.approved_by is not None:
-        approver = tenant_query(db, User, company_id).filter(User.id == entry.approved_by).first()
-        if approver is not None:
-            approver_names[approver.id] = approver.full_name
+    approver_names = _approver_names(db, company_id, {entry.approved_by} if entry.approved_by is not None else set())
     return _row(
         entry,
         viewer=viewer,
@@ -694,16 +708,33 @@ def set_clock_out(
     job_cost_after: Optional[float] = None
     actual_cost_before: Optional[float] = None
     actual_cost_after: Optional[float] = None
+    job_cost_skipped_reason: Optional[str] = None
+    job_cost_snapshot_before: Optional[dict] = None
+    job_cost: Optional[JobCost] = None
     try:
         db.flush()
         if work_order is not None:
+            # The job cost is resolved and LOCKED the way the job-cost module's own writer does
+            # (job_costing_access_service.resolve_job_cost(for_write=True)): FOR UPDATE OF the
+            # JobCost so a concurrent Recalculate cannot rebuild the same labor lines alongside
+            # this one (CostEntry has no version, so the loser would leave duplicates), and
+            # never on a soft-deleted work order, whose job cost that module refuses to write.
+            # Taken after the operation / work order / entry locks and before the audit writes,
+            # so the global audit-chain lock still comes last.
             job_cost = (
-                db.query(JobCost)
-                .filter(JobCost.work_order_id == work_order.id, JobCost.company_id == company_id)
+                job_cost_query(db, company_id)
+                .filter(JobCost.work_order_id == work_order.id, WorkOrder.is_deleted.is_(False))
+                .with_for_update(of=JobCost)
                 .first()
             )
+            if job_cost is None and work_order.is_deleted:
+                job_cost_skipped_reason = "work_order_deleted"
             if job_cost is not None:
                 job_cost_before = float(job_cost.actual_total_cost or 0)
+                job_cost_snapshot_before = {
+                    "job_cost": job_cost_snapshot(job_cost),
+                    "entries": [job_cost_snapshot(e) for e in job_cost.entries],
+                }
                 recompute_from_time_entries(db, job_cost=job_cost, company_id=company_id, user_id=actor.id)
                 job_cost_after = float(job_cost.actual_total_cost or 0)
                 job_cost_recomputed = True
@@ -760,9 +791,27 @@ def set_clock_out(
                     "job_cost_recomputed": job_cost_recomputed,
                     "job_cost_actual_total_before": job_cost_before,
                     "job_cost_actual_total_after": job_cost_after,
+                    "job_cost_skipped_reason": job_cost_skipped_reason,
                 },
                 required=True,
             )
+            if job_cost is not None and job_cost_recomputed:
+                # The rebuilt labor lines are a job-cost mutation: the same required
+                # RECALCULATE evidence (before/after job cost and every line) the job-cost
+                # module's own recalculate writes, in this transaction.
+                audit.log_required(
+                    "RECALCULATE",
+                    "job_cost",
+                    resource_id=job_cost.id,
+                    resource_identifier=str(job_cost.id),
+                    old_values=job_cost_snapshot_before,
+                    new_values={
+                        "job_cost": job_cost_snapshot(job_cost),
+                        "entries": [job_cost_snapshot(e) for e in job_cost.entries],
+                    },
+                    company_id=company_id,
+                    extra_data={"trigger": "time_entry_set_clock_out", "time_entry_id": entry.id},
+                )
         db.commit()
     except StaleDataError as exc:
         db.rollback()

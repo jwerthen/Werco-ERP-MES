@@ -201,18 +201,16 @@ describe('LaborReview page', () => {
   });
 
   it('approves non-optimistically and re-reads the list', async () => {
-    mockedApi.listLaborReviewEntries
-      .mockResolvedValueOnce(makeList([makeEntry()]))
-      .mockResolvedValueOnce(
-        makeList([
-          makeEntry({
-            approved: '2026-11-23T15:00:00Z',
-            approved_by_name: 'Me',
-            can_approve: false,
-            can_unapprove: true,
-          }),
-        ])
-      );
+    mockedApi.listLaborReviewEntries.mockResolvedValueOnce(makeList([makeEntry()])).mockResolvedValueOnce(
+      makeList([
+        makeEntry({
+          approved: '2026-11-23T15:00:00Z',
+          approved_by_name: 'Me',
+          can_approve: false,
+          can_unapprove: true,
+        }),
+      ])
+    );
     let resolveApprove: () => void = () => undefined;
     mockedApi.approveTimeEntry.mockImplementation(
       () =>
@@ -233,7 +231,7 @@ describe('LaborReview page', () => {
     await waitFor(() => expect(within(table()).getByText('Dana Fictional')).toBeInTheDocument());
 
     fireEvent.click(within(table()).getByRole('button', { name: /^Approve/ }));
-    expect(mockedApi.approveTimeEntry).toHaveBeenCalledWith(501);
+    expect(mockedApi.approveTimeEntry).toHaveBeenCalledWith(501, 3);
     // Still unapproved on screen while the server has not answered.
     expect(within(table()).getByText('unapproved')).toBeInTheDocument();
 
@@ -341,6 +339,26 @@ describe('LaborReview page', () => {
       await within(dialog).findByText('This time entry was modified concurrently. Refresh and retry.')
     ).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+    // The list is re-read on a 409 so reopening the dialog carries the entry's current version.
+    await waitFor(() => expect(mockedApi.listLaborReviewEntries).toHaveBeenCalledTimes(2));
+  });
+
+  it('will not save a correction whose time was left unchanged', async () => {
+    mockedApi.listLaborReviewEntries.mockResolvedValue(makeList([makeEntry()]));
+    renderPage();
+    await waitFor(() => expect(within(table()).getByText('Dana Fictional')).toBeInTheDocument());
+
+    fireEvent.click(within(table()).getByRole('button', { name: 'Correct clock-out for Dana Fictional' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'Checking' } });
+    // The field drops the stored clock-out's seconds: saving it untouched would move the time.
+    expect(within(dialog).getByText('Change the time to save a correction.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Save clock-out' })).toBeDisabled();
+    fireEvent.change(within(dialog).getByLabelText(/Clock-out \(Central time\)/), {
+      target: { value: '2026-11-20T14:00' },
+    });
+    expect(within(dialog).getByRole('button', { name: 'Save clock-out' })).toBeEnabled();
+    expect(mockedApi.setTimeEntryClockOut).not.toHaveBeenCalled();
   });
 
   it('refuses a clock-out before the clock-in without calling the server', async () => {

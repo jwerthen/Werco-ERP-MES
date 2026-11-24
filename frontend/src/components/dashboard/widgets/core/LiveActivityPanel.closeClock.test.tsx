@@ -193,4 +193,23 @@ describe('LiveActivityPanel Close clock', () => {
     // Hours deliberately left alone -> a warning, not a plain success.
     expect(await screen.findByText(/entered by hand, so they were left alone/)).toBeInTheDocument();
   });
+  it('re-reads the heartbeat when the server refuses 409, so a reopen carries the current version', async () => {
+    mockedApi.setTimeEntryClockOut.mockRejectedValue({
+      response: { status: 409, data: { detail: 'This time entry was modified concurrently. Refresh and retry.' } },
+    });
+    const { refresh } = renderPanel([assignment()]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close clock for Riley Example' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/Clock-out \(Central time\)/), {
+      target: { value: '2026-11-11T15:00' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/Reason/), { target: { value: 'Went home at shift end' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close clock' }));
+
+    expect(
+      await within(dialog).findByText('This time entry was modified concurrently. Refresh and retry.')
+    ).toBeInTheDocument();
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith(true));
+  });
 });

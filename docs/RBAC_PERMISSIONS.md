@@ -175,7 +175,7 @@ AI-external token bound to a **Viewer** user.
 ### Credential policy for judgment writes
 
 A few writes record a **person's judgment** — not just a permitted action — and some of them are
-restricted to certain *credentials*, on top of the role gate. The restrictions have eleven sources,
+restricted to certain *credentials*, on top of the role gate. The restrictions have twelve sources,
 and each row below names its own: owner ruling 3 of 2026-11-05 (the two AI rows), the owner's
 decision of 2026-11-07 (a standing API token may not declare scrap or close work short), this
 PR's extensions of that decision (scrap reasons, the re-stamp short close and the other count
@@ -193,7 +193,9 @@ its re-verification, and a CAR's effectiveness verification), the floor-PIN chan
 PIN policy, is credential administration, a person's act), and the restricted document viewing
 change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
 and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry
-(an MCP agent on a person's own JWT too, a half not separately put to the owner).
+(an MCP agent on a person's own JWT too, a half not separately put to the owner), and the
+Labor Review build of 2026-11-23 (approving labor, clearing an approval and setting another person's
+clock-out are a person's judgment; the plan's recommended defaults, not owner rulings).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -346,6 +348,8 @@ See [Continuous Improvement](CONTINUOUS_IMPROVEMENT.md) for the workflow.
 | Hold / resume operation (shop-floor verb) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Resolve / dismiss the blocker behind a hold | ✓ | ✓ | ✓ | | | | |
 | Approve labor (TimeEntry) | ✓ | ✓ | ✓ | | ✓ | | |
+| Labor Review list (`GET /shop-floor/time-entries`) | ✓ | ✓ | ✓ | | ✓ | | |
+| Set another person's clock-out (`POST /shop-floor/time-entries/{id}/set-clock-out`) | ✓ | ✓ | ✓ | | | | |
 | View material ties | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Tie / edit / untie material | ✓ | ✓ | ✓ | | | | |
 | View work order templates | ✓ | ✓ | ✓ | | | | |

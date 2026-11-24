@@ -83,6 +83,18 @@ class LaborReviewListResponse(UTCModel):
     long_zero_pieces_hours: float
 
 
+class TimeEntryApprovalRequest(BaseModel):
+    """Optional body of approve / unapprove: the entry's version as the approver last read it."""
+
+    version: Optional[int] = Field(
+        None,
+        ge=1,
+        description="The entry's version as last read; when given, a stale one is refused 409.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SetClockOutRequest(BaseModel):
     """A supervisor's stated clock-out for another person's unapproved time entry."""
 

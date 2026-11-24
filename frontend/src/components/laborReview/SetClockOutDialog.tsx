@@ -49,6 +49,15 @@ export interface SetClockOutDialogProps {
   target: SetClockOutTarget | null;
   onClose: () => void;
   onSaved: (response: SetClockOutResponse) => void;
+  /**
+   * Called when the server refuses 409 (stale version, approved or closed meanwhile): the
+   * caller re-reads its list so the next open of the dialog carries the current `version`.
+   */
+  onRefused?: () => void;
+}
+
+function errorStatus(err: unknown): number | undefined {
+  return (err as { response?: { status?: number } } | null)?.response?.status;
 }
 
 /** The dialog's default time: the current clock-out, else the shift end (if past), else now. */
@@ -85,11 +94,12 @@ export function describeHoursResult(hours: HoursRederivation | null): { text: st
   return { text: `Clock-out saved, but ${reason}.`, warn: true };
 }
 
-export function SetClockOutDialog({ open, target, onClose, onSaved }: SetClockOutDialogProps) {
+export function SetClockOutDialog({ open, target, onClose, onSaved, onRefused }: SetClockOutDialogProps) {
   const titleId = useId();
   // Seeded once per mount: callers mount the dialog with `key={entry id:version}`, so a
   // dialog opened on another entry never carries the previous entry's time or reason.
-  const [value, setValue] = useState(() => (target ? defaultClockOutValue(target) : ''));
+  const [initialValue] = useState(() => (target ? defaultClockOutValue(target) : ''));
+  const [value, setValue] = useState(initialValue);
   const [reason, setReason] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,7 +122,12 @@ export function SetClockOutDialog({ open, target, onClose, onSaved }: SetClockOu
   const hoursPreview =
     chosenMs != null && clockInMs != null && chosenMs > clockInMs ? (chosenMs - clockInMs) / 3_600_000 : null;
 
-  const canSubmit = !!target && !timeError && trimmedReason.length > 0 && !pending;
+  // The field has minute precision while a stored clock-out has seconds: submitting an
+  // untouched correction would silently move the clock-out by the dropped seconds (and write
+  // an audit row nobody intended), so a correction must change the time before it can save.
+  const unchangedCorrection = !!target?.clockOut && value === initialValue;
+
+  const canSubmit = !!target && !timeError && !unchangedCorrection && trimmedReason.length > 0 && !pending;
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -129,6 +144,7 @@ export function SetClockOutDialog({ open, target, onClose, onSaved }: SetClockOu
       onSaved(response);
     } catch (err) {
       setError(apiErrorDetail(err, 'The clock-out could not be saved.'));
+      if (errorStatus(err) === 409) onRefused?.();
     } finally {
       setPending(false);
     }
@@ -178,7 +194,13 @@ export function SetClockOutDialog({ open, target, onClose, onSaved }: SetClockOu
               label="Clock-out (Central time)"
               required
               error={touched || value ? timeError : null}
-              help={hoursPreview != null ? `Entry length: ${hoursPreview.toFixed(2)} h` : undefined}
+              help={
+                unchangedCorrection
+                  ? 'Change the time to save a correction.'
+                  : hoursPreview != null
+                    ? `Entry length: ${hoursPreview.toFixed(2)} h`
+                    : undefined
+              }
             >
               {field => (
                 <input

@@ -248,8 +248,10 @@ export default function LaborReview() {
     async (entry: LaborReviewEntry, kind: 'approve' | 'unapprove') => {
       setPendingAction({ id: entry.id, kind });
       try {
-        if (kind === 'approve') await api.approveTimeEntry(entry.id);
-        else await api.unapproveTimeEntry(entry.id);
+        // The row's version: the server refuses 409 if the entry (its hours) changed since
+        // this list was read, so an approval never lands on hours the approver did not see.
+        if (kind === 'approve') await api.approveTimeEntry(entry.id, entry.version);
+        else await api.unapproveTimeEntry(entry.id, entry.version);
         showToast(
           'success',
           kind === 'approve'
@@ -796,6 +798,7 @@ export default function LaborReview() {
           target={clockTarget}
           onClose={() => setClockTarget(null)}
           onSaved={handleClockSaved}
+          onRefused={() => void reload()}
         />
       )}
     </div>

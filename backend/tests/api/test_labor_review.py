@@ -16,6 +16,7 @@ from app.models.audit_log import AuditLog
 from app.models.time_entry import TimeEntry, TimeEntrySource, TimeEntryType
 from app.models.user import UserRole
 from app.models.work_order import OperationStatus, WorkOrderStatus
+from app.services import labor_review_service
 from app.services.labor_review_service import (
     APPROVED_ENTRY_CLOCK_OUT_DETAIL,
     CLOCK_OUT_BEFORE_CLOCK_IN_DETAIL,
@@ -36,6 +37,7 @@ from tests.api.test_time_entry_approval_batch11b import (
     make_wo,
     make_work_center,
 )
+from tests.production_calendar_helpers import seed_werco_calendar
 
 pytestmark = [pytest.mark.api, pytest.mark.requires_db]
 
@@ -375,3 +377,88 @@ def test_terminal_work_order_closing_does_not_accrue(client: TestClient, db_sess
     stored = db_session.get(TimeEntry, entry.id)
     assert stored.clock_out is not None
     assert float(stored.work_order.actual_hours or 0) == 0
+
+
+def test_flag_counts_are_per_flag_totals_whatever_flag_is_selected(client: TestClient, db_session: Session):
+    """Clicking one chip must not turn every other chip's count into "entries with both flags"."""
+    operator, supervisor, wo, op = _world(db_session)
+    long_one = make_closed_entry(db_session, operator, wo, op, duration_hours=13)
+    long_one.quantity_produced = 5
+    backfilled = make_closed_entry(db_session, make_user(db_session, role=UserRole.OPERATOR), wo, op, duration_hours=1)
+    backfilled.source = TimeEntrySource.BACKFILL.value
+    backfilled.quantity_produced = 1
+    db_session.commit()
+
+    unfiltered = client.get(LIST_URL, headers=headers_for(supervisor)).json()
+    only_backfill = client.get(LIST_URL, params={"flag": "backfill"}, headers=headers_for(supervisor)).json()
+    flagged = client.get(LIST_URL, params={"flagged_only": "true"}, headers=headers_for(supervisor)).json()
+    assert [row["id"] for row in only_backfill["items"]] == [backfilled.id]
+    assert unfiltered["flag_counts"]["long_entry"] == 1
+    assert only_backfill["flag_counts"] == unfiltered["flag_counts"]
+    assert flagged["flag_counts"] == unfiltered["flag_counts"]
+
+
+@pytest.mark.parametrize(
+    "weld, clock_in, shift_end",
+    [
+        # Rest of shop 1st shift (07:30-16:00 Central): in at 08:00 CST, ends 16:00 CST.
+        (False, datetime(2026, 11, 18, 14, 0), datetime(2026, 11, 18, 22, 0)),
+        # Weld 2nd shift (15:30-02:00 Central, crosses midnight): in at 16:00 CST, ends 02:00 CST next day.
+        (True, datetime(2026, 11, 18, 22, 0), datetime(2026, 11, 19, 8, 0)),
+    ],
+)
+def test_open_past_shift_end_flags_after_the_started_shift_ends(
+    db_session: Session, weld: bool, clock_in: datetime, shift_end: datetime
+):
+    operator, supervisor, wo, op = _world(db_session)
+    admin = make_user(db_session, role=UserRole.ADMIN)
+    other_wc = make_work_center(db_session)
+    seed_werco_calendar(db_session, COMPANY_A, admin.id, [op.work_center_id] if weld else [other_wc.id])
+    entry = TimeEntry(
+        user_id=operator.id,
+        work_order_id=wo.id,
+        operation_id=op.id,
+        work_center_id=op.work_center_id,
+        entry_type=TimeEntryType.RUN,
+        clock_in=clock_in,
+        company_id=COMPANY_A,
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    def row_at(now: datetime):
+        listing = labor_review_service.list_time_entries(db_session, COMPANY_A, supervisor, status="open", now=now)
+        return next(item for item in listing.items if item.id == entry.id)
+
+    before = row_at(shift_end - timedelta(minutes=30))
+    assert "open_past_shift_end" not in before.flags
+    after = row_at(shift_end + timedelta(minutes=30))
+    assert "open_past_shift_end" in after.flags
+    assert after.shift_end is not None
+    assert after.shift_end.replace(tzinfo=None) == shift_end
+
+
+def test_approve_with_a_stale_version_is_refused(client: TestClient, db_session: Session):
+    """An approval names the version the approver saw; one changed since is refused 409."""
+    operator, supervisor, wo, op = _world(db_session)
+    entry = make_closed_entry(db_session, operator, wo, op, duration_hours=2)
+    db_session.commit()
+    seen = entry.version
+
+    url = f"/api/v1/shop-floor/time-entries/{entry.id}/approve"
+    stale = client.post(url, json={"version": seen + 1}, headers=headers_for(supervisor))
+    assert stale.status_code == 409 and stale.json()["detail"] == STALE_TIME_ENTRY_DETAIL
+    db_session.expire_all()
+    assert db_session.get(TimeEntry, entry.id).approved is None
+
+    ok = client.post(url, json={"version": seen}, headers=headers_for(supervisor))
+    assert ok.status_code == 200, ok.text
+    db_session.expire_all()
+    approved = db_session.get(TimeEntry, entry.id)
+    assert approved.approved is not None
+
+    unapprove_url = f"/api/v1/shop-floor/time-entries/{entry.id}/unapprove"
+    stale_clear = client.post(unapprove_url, json={"version": seen}, headers=headers_for(supervisor))
+    assert stale_clear.status_code == 409
+    cleared = client.post(unapprove_url, json={"version": approved.version}, headers=headers_for(supervisor))
+    assert cleared.status_code == 200, cleared.text

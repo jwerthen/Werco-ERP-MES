@@ -6719,8 +6719,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
 | POST | `/shop-floor/operations/{id}/inspection` | Record operation inspection complete (sets `inspection_complete`) | Admin / Manager / Supervisor / Quality |
-| POST | `/shop-floor/time-entries/{id}/approve` | Approve a TimeEntry (sets `approved` / `approved_by`) | Admin / Manager / Supervisor / Quality |
-| POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry | Admin / Manager / Supervisor / Quality |
+| GET | `/shop-floor/time-entries` | Labor Review list: time entries by production day with review flags, server-paged (see "Labor Review" below). Pure read. A kiosk badge is **403** | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/set-clock-out` | Close or correct another person's **unapproved** entry at a stated time with a reason (hours only; see "Labor Review" below). An API token and a kiosk badge are **403**; not an MCP tool | Admin / Manager / Supervisor |
+| POST | `/shop-floor/time-entries/{id}/approve` | Approve a **closed** TimeEntry (sets `approved` / `approved_by`); **409** while still clocked in; optional body `{"version": n}` → **409** when stale. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/time-entries/{id}/unapprove` | Clear approval on a TimeEntry; optional body `{"version": n}` as approve. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/work-center-queue/{id}` | Get work center queue, each row carrying the live crew `roster` and the manager-set `run_order`, **plus a separate `held` list** of the work center's `ON_HOLD` operations (`held_truncated` when capped). Every row also carries the job's written guidance — see "Written job guidance on operator reads" for the five keys and the station-disclosure decision (see notes below). Top-level **`dispatch_notice`**: this machine's newest planner dispatch notice (12 h window) or `null` — see "Floor dispatch notices" below. Rows in **both** `queue` and `held` carry **`work_order_status`** and **`start_blocked_reason`** (static server text, so a crew-station token gets it too). A READY operation of an on-hold work order stays in `queue` with the reason — a work-order hold does not move rows onto `held` | User **or** kiosk station token |
 | GET | `/shop-floor/dispatch-board` | Manager dispatch board, **machine view** — every **active** work center with its live queue, including work centers with an **empty** queue, plus any **deactivated** work center still holding queued work, flagged `is_active: false`. Rows carry the work order's plan position (`dispatch_position`) for the work-order bands; columns carry `queued_hours` (see note below) | Admin / Manager / Supervisor |
 | GET | `/shop-floor/dispatch-board/work-orders` | Manager dispatch board, **work-order view** — every live work order (DRAFT included) as a lane with all its operations, the planned lanes first in plan order. Pure read (see "Work-order dispatch plan" below) | Admin / Manager / Supervisor |
@@ -8190,7 +8192,16 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 >   is a no-op that returns the current state with **no second audit row**);
 > - respect the TimeEntry's optimistic-lock `version` column — a concurrent stale write returns
 >   **409 Conflict** (`"This time entry was modified concurrently. Refresh and retry."`);
-> - write **one** tamper-evident `audit_log` row (action `time_entry_approve` / `time_entry_unapprove`).
+> - write **one** tamper-evident `audit_log` row (action `time_entry_approve` / `time_entry_unapprove`);
+> - take an optional body `{"version": n}`: the entry's version as the approver read it. When given and
+>   the entry has changed since (a supervisor's clock-out correction, say), **409** with the same text,
+>   so an approval never lands on hours the approver did not see. No body keeps the old behavior;
+> - **refuse a standing API token and a kiosk badge (403)** — approval is a person's judgment (see
+>   `docs/RBAC_PERMISSIONS.md` → Credential policy for judgment writes); neither is an MCP tool.
+>
+> Approve additionally refuses **409** an entry that is still clocked in (`"This time entry is still
+> clocked in. Close the clock before approving it."`); unapprove stays open for one approved before
+> that rule.
 >
 > Both return the updated `TimeEntryResponse` (now carrying `approved` / `approved_by`; these also
 > surface on `GET /shop-floor/my-active-job`). Approval is what the opt-in
@@ -8198,6 +8209,39 @@ let a supervisor sign off on shop-floor labor (G5-A). Approve sets `approved` (t
 > feed the labor-cost legs (job costing, completion cost rollup, and the analytics OEE/labor leg).
 > When the flag is **off** (the default), approval is recorded but does not affect costing. See
 > `docs/ENVIRONMENT_VARIABLES.md`.
+
+#### Labor Review
+
+`GET /shop-floor/time-entries` (Admin / Manager / Supervisor / Quality; a kiosk badge is **403**) lists
+time entries attributed to **production days** by the company's production calendar, newest clock-in
+first. Query: `start_date` / `end_date` (production days, inclusive; none = the last 7 production days,
+or with `status=open` every entry still clocked in whenever it started; at most 62 days, **422** above
+it or when reversed), `user_id`, `work_center_id`, `work_order_id`, `status` (`open` / `closed`),
+`approved`, `flag`, `flagged_only`, `page`, `page_size` (≤ 200). Each item carries the entry, its
+`version`, `production_day`, `shift_name`, `shift_end` (end of the shift it started in), `flags`
+(`open_past_shift_end`, `long_entry` > 12 h, `overlap`, `open_on_closed_work`, `long_zero_pieces` — a
+run / rework entry ≥ 4 h with no pieces or scrap — and `backfill`) and the viewer's `can_approve` /
+`can_unapprove` / `can_set_clock_out`. `flag_counts` are per-flag totals over every page of the
+result **before** `flag` / `flagged_only` narrow it, so the chips stay stable when one is selected.
+Pure read: no audit row, no event, no write.
+
+`POST /shop-floor/time-entries/{id}/set-clock-out` (Admin / Manager / Supervisor, signed in to the app
+as themselves; an API token and a kiosk badge are **403**; not an MCP tool) closes another person's
+forgotten clock, or corrects a closed entry's clock-out, on an **unapproved** entry. Body
+`{"clock_out": "<UTC>", "reason": "...", "version": n}`. Refused before any write: **404** not found
+(tenant-scoped), **403** your own entry, **409** an approved entry, **409** a stale `version`, **422** a
+clock-out at or before the clock-in or in the future. It changes **hours only**, never pieces or scrap.
+The operation's and work order's stored hours move by this entry's change in hours when they came from
+time entries and are left alone otherwise (`hours.applied` / `hours.skipped_reason`). When the work
+order has a job cost, its time-entry labor lines are rebuilt under a lock on the job cost and a
+required `RECALCULATE` `job_cost` audit row records the before/after lines; a soft-deleted work order's
+job cost is not touched (`job_cost_skipped_reason: "work_order_deleted"` on the time-entry audit row).
+The required `time_entry_set_clock_out` audit row carries the old and new clock-out, duration, hours
+and the reason; **503** and nothing saved when it cannot be written. Re-sending the stored clock-out
+is a no-op (`changed: false`, no audit row).
+
+`GET /shop-floor/dashboard`'s `active_assignments[]` carry `time_entry_version`, which the dashboard's
+Live Shop Activity **Close clock** link sends as `version`.
 
 #### Clock Out Schema
 

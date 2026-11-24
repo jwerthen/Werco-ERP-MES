@@ -2191,17 +2191,24 @@ class ApiService {
 
   /**
    * POST /shop-floor/time-entries/{id}/approve — sign off a CLOSED time entry (not your own).
-   * Admin / Manager / Supervisor / Quality; 409 while the entry is still clocked in.
+   * Admin / Manager / Supervisor / Quality; 409 while the entry is still clocked in. With
+   * `version`, 409 when the entry changed since it was read.
    */
-  async approveTimeEntry(timeEntryId: number): Promise<TimeEntryApprovalResult> {
-    const response = await this.api.post<TimeEntryApprovalResult>(`/shop-floor/time-entries/${timeEntryId}/approve`);
+  async approveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/approve`,
+      version === undefined ? undefined : { version }
+    );
     this.invalidateCache('/shop-floor/time-entries');
     return response.data;
   }
 
-  /** POST /shop-floor/time-entries/{id}/unapprove — clear an approval (not your own). */
-  async unapproveTimeEntry(timeEntryId: number): Promise<TimeEntryApprovalResult> {
-    const response = await this.api.post<TimeEntryApprovalResult>(`/shop-floor/time-entries/${timeEntryId}/unapprove`);
+  /** POST /shop-floor/time-entries/{id}/unapprove — clear an approval (not your own); `version` as approve. */
+  async unapproveTimeEntry(timeEntryId: number, version?: number): Promise<TimeEntryApprovalResult> {
+    const response = await this.api.post<TimeEntryApprovalResult>(
+      `/shop-floor/time-entries/${timeEntryId}/unapprove`,
+      version === undefined ? undefined : { version }
+    );
     this.invalidateCache('/shop-floor/time-entries');
     return response.data;
   }

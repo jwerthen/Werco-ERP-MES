@@ -428,3 +428,60 @@ def test_an_open_entry_approved_before_the_rule_can_still_be_unapproved(client: 
     db_session.expire_all()
     stored = db_session.get(TimeEntry, entry.id)
     assert stored.approved is None and stored.clock_out is None
+
+
+def test_job_cost_rebuild_writes_required_recalculate_evidence(client: TestClient, db_session: Session, monkeypatch):
+    """The rebuilt labor lines are a job-cost mutation: a RECALCULATE job_cost row records them."""
+    monkeypatch.setattr(settings, "REQUIRE_APPROVED_LABOR_FOR_COST", False)
+    operator, supervisor, wo, op = _world(db_session, hourly_rate=100.0)
+    entry = make_closed_entry(db_session, operator, wo, op, duration_hours=10)
+    op.actual_run_hours = 10.0
+    wo.actual_hours = 10.0
+    job_cost = JobCost(work_order_id=wo.id, status=JobCostStatus.IN_PROGRESS, company_id=COMPANY_A)
+    db_session.add(job_cost)
+    db_session.commit()
+
+    resp = _post(client, supervisor, entry, entry.clock_in + timedelta(hours=3))
+    assert resp.status_code == 200, resp.text
+
+    db_session.expire_all()
+    rows = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "job_cost", AuditLog.resource_id == job_cost.id)
+        .all()
+    )
+    assert [row.action for row in rows] == ["RECALCULATE"]
+    assert rows[0].extra_data["time_entry_id"] == entry.id
+    assert set(rows[0].new_values) == {"job_cost", "entries"}
+    assert len(rows[0].new_values["entries"]) == 1
+
+
+def test_soft_deleted_work_order_job_cost_is_not_rebuilt(client: TestClient, db_session: Session, monkeypatch):
+    """The job-cost module refuses to write a deleted work order's job cost; so does this verb."""
+    monkeypatch.setattr(settings, "REQUIRE_APPROVED_LABOR_FOR_COST", False)
+    operator, supervisor, wo, op = _world(db_session, hourly_rate=100.0)
+    entry = make_closed_entry(db_session, operator, wo, op, duration_hours=10)
+    op.actual_run_hours = 10.0
+    wo.actual_hours = 10.0
+    job_cost = JobCost(work_order_id=wo.id, status=JobCostStatus.IN_PROGRESS, company_id=COMPANY_A)
+    db_session.add(job_cost)
+    db_session.flush()
+    wo.soft_delete(supervisor.id)
+    db_session.commit()
+
+    resp = _post(client, supervisor, entry, entry.clock_in + timedelta(hours=3))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["hours"]["job_cost_recomputed"] is False
+
+    db_session.expire_all()
+    assert (
+        db_session.query(CostEntry).filter(CostEntry.job_cost_id == job_cost.id).count() == 0
+    ), "no labor lines were rebuilt on the deleted work order's job cost"
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "job_cost", AuditLog.resource_id == job_cost.id)
+        .count()
+        == 0
+    )
+    audit = _audit_rows(db_session, entry.id)
+    assert audit[0].extra_data["job_cost_skipped_reason"] == "work_order_deleted"

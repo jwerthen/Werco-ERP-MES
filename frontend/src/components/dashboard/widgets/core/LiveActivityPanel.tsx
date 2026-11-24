@@ -139,6 +139,7 @@ export function LiveActivityPanel() {
           target={clockTarget}
           onClose={() => setClockTarget(null)}
           onSaved={handleClockSaved}
+          onRefused={() => refresh(true)}
         />
       )}
     </CockpitPanel>

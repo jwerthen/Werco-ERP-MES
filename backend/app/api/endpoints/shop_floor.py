@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Literal, Optional, Sequence, Union
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
@@ -30,7 +30,12 @@ from app.api.deps import (
 )
 from app.core.cache import invalidate_work_centers_cache
 from app.core.config import settings
-from app.core.credentials import KIOSK_TOKEN_SCOPE, is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import (
+    KIOSK_TOKEN_SCOPE,
+    is_api_token_credential,
+    is_interactive_person,
+    is_narrowed_api_token,
+)
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import CENTRAL_TIME_ZONE, to_utc_iso
@@ -82,6 +87,7 @@ from app.schemas.labor_review import (
     LaborReviewListResponse,
     SetClockOutRequest,
     SetClockOutResponse,
+    TimeEntryApprovalRequest,
 )
 from app.schemas.process_sheet import (
     OperationStepRecordCreate,
@@ -2597,6 +2603,7 @@ def _set_time_entry_approval(
     current_user: User,
     company_id: int,
     audit: AuditService,
+    expected_version: Optional[int] = None,
 ) -> TimeEntry:
     """Shared approve/unapprove body (G5-A).
 
@@ -2615,6 +2622,12 @@ def _set_time_entry_approval(
     # approver role). Unapprove is gated the same way for symmetry.
     if time_entry.user_id == current_user.id:
         raise HTTPException(status_code=403, detail="You cannot approve or unapprove your own time entry")
+
+    # The approver's read: when the caller says which version it saw, an entry changed since
+    # (a supervisor's clock-out correction, say) is refused 409 rather than approved on hours
+    # the approver never saw. version_id_col only catches a write concurrent with the flush.
+    if expected_version is not None and int(time_entry.version or 1) != int(expected_version):
+        raise HTTPException(status_code=409, detail=STALE_TIME_ENTRY_DETAIL)
 
     old_approved = time_entry.approved
     old_approved_by = time_entry.approved_by
@@ -2682,6 +2695,10 @@ def _refuse_labor_judgment_credential(current_user: User) -> None:
     if is_api_token_credential(current_user):
         raise HTTPException(status_code=403, detail=LABOR_JUDGMENT_API_TOKEN_DETAIL)
     _refuse_kiosk_badge(current_user)
+    # Backstop: the shared "a person signed in as themselves" rule, so a credential scope
+    # added there later is refused here too even if the two texts above do not name it.
+    if not is_interactive_person(current_user):
+        raise HTTPException(status_code=403, detail=LABOR_JUDGMENT_API_TOKEN_DETAIL)
 
 
 def _refuse_kiosk_badge(current_user: User) -> None:
@@ -2768,6 +2785,7 @@ def set_time_entry_clock_out(
 @router.post("/time-entries/{time_entry_id}/approve", response_model=TimeEntryResponse)
 def approve_time_entry(
     time_entry_id: int,
+    payload: Optional[TimeEntryApprovalRequest] = Body(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -2779,7 +2797,8 @@ def approve_time_entry(
     ADMIN / MANAGER / SUPERVISOR / QUALITY; forbids self-approval; tenant-scoped; respects the
     optimistic-lock ``version`` column; audited. Approval is what the opt-in
     ``REQUIRE_APPROVED_LABOR_FOR_COST`` flag keys on for the labor-cost legs. An entry still
-    clocked in is refused 409 (close the clock first). A standing API token and a kiosk badge
+    clocked in is refused 409 (close the clock first). An optional body ``{"version": n}``
+    refuses 409 when the entry changed since the approver read it. A standing API token and a kiosk badge
     are refused 403: approval is a person's judgment. Not an MCP tool.
     """
     _refuse_labor_judgment_credential(current_user)
@@ -2790,12 +2809,14 @@ def approve_time_entry(
         current_user=current_user,
         company_id=company_id,
         audit=audit,
+        expected_version=payload.version if payload is not None else None,
     )
 
 
 @router.post("/time-entries/{time_entry_id}/unapprove", response_model=TimeEntryResponse)
 def unapprove_time_entry(
     time_entry_id: int,
+    payload: Optional[TimeEntryApprovalRequest] = Body(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(_TIME_ENTRY_APPROVAL_ROLES)),
     company_id: int = Depends(get_current_company_id),
@@ -2815,6 +2836,7 @@ def unapprove_time_entry(
         current_user=current_user,
         company_id=company_id,
         audit=audit,
+        expected_version=payload.version if payload is not None else None,
     )
 
 
