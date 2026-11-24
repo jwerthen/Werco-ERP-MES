@@ -228,7 +228,7 @@ beforeEach(() => {
     pagination: { page: 1, page_size: 5, total_count: 0, total_pages: 0, has_next: false, has_previous: false },
   });
   mockedApi.getUnreadCount.mockResolvedValue(0);
-  mockedApi.getSetupHealth.mockResolvedValue({ progress: 40 });
+  mockedApi.getSetupHealth.mockResolvedValue({ progress: 40, counts: {}, steps: [], issues: [] });
   mockedApi.getAIRecommendations.mockResolvedValue([]);
   mockedApi.getDashboardLayout.mockResolvedValue(layoutResponse(null));
   mockedApi.saveDashboardLayout.mockImplementation(async body => layoutResponse(body.layout, { version: 3 }));

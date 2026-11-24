@@ -32,3 +32,30 @@ it('retains the last checklist but withdraws readiness after refresh fails', asy
   expect(screen.getByText('100%')).toBeInTheDocument();
   expect(screen.queryByText(/ready for production/)).not.toBeInTheDocument();
 });
+it('shows the document storage backend from setup health', async () => {
+  (api.getSetupHealth as jest.Mock).mockResolvedValue({
+    progress: 100,
+    counts: {},
+    steps: [],
+    issues: [],
+    storage: {
+      backend: 'local',
+      durability: 'ephemeral',
+      bucket: null,
+      endpoint_host: null,
+      region: null,
+      upload_dir_configured: false,
+      upload_dir_exists: true,
+      upload_dir_on_mounted_volume: false,
+      warning: 'Files uploaded to this service are lost on the next redeploy.',
+    },
+  });
+  render(
+    <MemoryRouter>
+      <SetupWizard />
+    </MemoryRouter>
+  );
+  expect(await screen.findByRole('heading', { name: 'Document Storage' })).toBeInTheDocument();
+  expect(screen.getByText('Local disk')).toBeInTheDocument();
+  expect(screen.getByText(/lost on the next redeploy/)).toBeInTheDocument();
+});
