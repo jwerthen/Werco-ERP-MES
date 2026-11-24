@@ -26,6 +26,11 @@ import LaserNestImportWizard from '../components/laser/LaserNestImportWizard';
 import WorkOrderPdfPreviewModal from '../components/workorders/WorkOrderPdfPreviewModal';
 import { CompleteWorkModal, CompleteWorkSubmit } from '../components/workorders/CompleteWorkModal';
 import MaterialTiesPanel from '../components/workorders/MaterialTiesPanel';
+import {
+  NestTieSummaryNotice,
+  releaseUntiedNestWarning,
+  useWorkOrderNestTieSummary,
+} from '../components/laser/NestTieSummaryNotice';
 import OperationMaterialTieModal from '../components/workorders/OperationMaterialTieModal';
 import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrderModal';
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
@@ -683,6 +688,18 @@ export default function WorkOrderDetail() {
   // so without this a tie created from the Operations table would leave a stale
   // list sitting directly beneath it.
   const [tieRefreshToken, setTieRefreshToken] = useState(0);
+  // Release-confirm warning for untied laser nests (null = closed). Warning only.
+  const [releaseWarning, setReleaseWarning] = useState<string | null>(null);
+  const [releaseChecking, setReleaseChecking] = useState(false);
+  const [releasing, setReleasing] = useState(false);
+  // "N of M nests have no sheet tied" — office-only (this page), work_orders:edit
+  // to match the endpoint's ADMIN / MANAGER / SUPERVISOR gate. Re-read when the
+  // work order changes or a tie is written from this page.
+  const { summary: nestTieSummary, refresh: refreshNestTieSummary } = useWorkOrderNestTieSummary(
+    workOrder?.id,
+    canEditMaterialTies,
+    `${workOrder?.updated_at ?? ''}:${tieRefreshToken}`
+  );
   // Drives the CompleteWorkModal: either the work-order-level completion or a
   // specific operation. `null` = closed. The modal collects the good and scrap
   // TOTALS (prefilled with what is recorded), a scrap reason when the scrap total
@@ -1114,6 +1131,36 @@ export default function WorkOrderDetail() {
       loadWorkOrder();
     } catch (err: any) {
       showToast('error', err.response?.data?.detail || 'Failed to release work order');
+    }
+  };
+
+  // Release on a laser job with untied nests WARNS first and never refuses (the
+  // plan's recommended default; the owner has not ruled). The figure is re-read
+  // at click time so a sheet tied since the page loaded is not warned about;
+  // a job whose loaded summary shows no nests releases straight away.
+  const handleReleaseClick = async () => {
+    if (nestTieSummary && nestTieSummary.nest_count > 0) {
+      setReleaseChecking(true);
+      try {
+        const latest = await refreshNestTieSummary();
+        if (latest && latest.untied_count > 0) {
+          setReleaseWarning(releaseUntiedNestWarning(latest));
+          return;
+        }
+      } finally {
+        setReleaseChecking(false);
+      }
+    }
+    await handleRelease();
+  };
+
+  const handleConfirmReleaseWithUntied = async () => {
+    setReleasing(true);
+    try {
+      await handleRelease();
+    } finally {
+      setReleasing(false);
+      setReleaseWarning(null);
     }
   };
 
@@ -2384,10 +2431,15 @@ export default function WorkOrderDetail() {
             {workOrder.status.replace('_', ' ')}
           </span>
           {workOrder.status === 'draft' && canReleaseWorkOrder && (
-            <Button onClick={handleRelease} className="flex items-center">
+            <LoadingButton
+              type="button"
+              onClick={() => void handleReleaseClick()}
+              loading={releaseChecking}
+              className="flex items-center"
+            >
               <PlayIcon className="h-5 w-5 mr-2" />
               Release
-            </Button>
+            </LoadingButton>
           )}
           {workOrder.status === 'released' && canStartWorkOrder && (
             <LoadingButton
@@ -3981,6 +4033,7 @@ export default function WorkOrderDetail() {
         // operation leaves behind, which nothing else on this page distinguishes
         // from an ordinary tie.
         operations={workOrder.operations}
+        notice={<NestTieSummaryNotice summary={nestTieSummary} />}
       />
 
       {/* Per-operation material tie editor, opened from the Operations table.
@@ -4321,6 +4374,21 @@ export default function WorkOrderDetail() {
           saved, 403, network) keeps the dialog open beside the action; a refusal
           that means the job moved (400 not on hold, 404, 409) closes it and
           re-reads the page — see handleConfirmResume. */}
+      {/* Release with untied laser nests — a WARNING; Release still goes ahead. */}
+      <ConfirmDialog
+        open={releaseWarning !== null}
+        title="Release with untied nests?"
+        message={releaseWarning ?? ''}
+        confirmLabel="Release anyway"
+        cancelLabel="Not yet"
+        pending={releasing}
+        variant="warning"
+        onConfirm={() => void handleConfirmReleaseWithUntied()}
+        onCancel={() => {
+          if (!releasing) setReleaseWarning(null);
+        }}
+      />
+
       <ConfirmDialog
         open={resumeConfirmOpen}
         title="Resume Work Order"

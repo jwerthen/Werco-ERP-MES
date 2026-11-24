@@ -22,6 +22,14 @@ import type {
   CustomerExportControl,
 } from '../types/exportControl';
 import type { InventoryOwnershipChange, InventoryOwnershipChangeResult, OwnershipType } from '../types/ownership';
+import type {
+  NestTieCoverageResponse,
+  ProposedNestTie,
+  UntiedNestListParams,
+  UntiedNestListResponse,
+  UntiedSheetReportResponse,
+  WorkOrderNestTieSummary,
+} from '../types/untiedNests';
 import {
   normalizeDocumentAccessReview,
   type DocumentAccessChangeRequest,
@@ -1740,6 +1748,57 @@ class ApiService {
   async fetchLaserNestDocument(laserNestId: number): Promise<string> {
     const response = await this.api.get(`/laser-nests/${laserNestId}/document`, { responseType: 'blob' });
     return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+  }
+
+  // --- Untied laser nests (office reads) --------------------------------------
+  // Nest operations with no OPEN sheet tie. All four are PURE READS gated to
+  // ADMIN / MANAGER / SUPERVISOR server-side (`work_orders:edit` client-side).
+  // Office screens only: the dispatch board, kiosk and crew station must never
+  // call these — an untied operation renders nothing on a floor screen, by
+  // recorded contract. Date params are company-local YYYY-MM-DD days.
+
+  /** The untied-nest worklist: open nests, plus nests completed in the window. */
+  async getUntiedLaserNests(params: UntiedNestListParams = {}): Promise<UntiedNestListResponse> {
+    const response = await this.api.get<UntiedNestListResponse>('/laser-nests/untied', { params });
+    return response.data;
+  }
+
+  /** Per company-local month: completed nests and how many carried a sheet tie. */
+  async getLaserNestTieCoverage(months?: number): Promise<NestTieCoverageResponse> {
+    const response = await this.api.get<NestTieCoverageResponse>('/laser-nests/untied/coverage', {
+      params: months ? { months } : undefined,
+    });
+    return response.data;
+  }
+
+  /** Completed untied nests grouped by (approximate) sheet spec, with sheets burned. */
+  async getUntiedSheetReport(
+    params: { completed_from?: string; completed_to?: string } = {}
+  ): Promise<UntiedSheetReportResponse> {
+    const response = await this.api.get<UntiedSheetReportResponse>('/laser-nests/untied/sheet-report', { params });
+    return response.data;
+  }
+
+  /** 'N of M nests have no sheet tied' for one job (its own nests plus its laser child jobs'). */
+  async getWorkOrderNestTieSummary(workOrderId: number): Promise<WorkOrderNestTieSummary> {
+    const response = await this.api.get<WorkOrderNestTieSummary>(
+      `/laser-nests/work-orders/${workOrderId}/tie-summary`
+    );
+    return response.data;
+  }
+
+  /**
+   * "Tie this sheet": post a worklist row's tie through the EXISTING
+   * `POST /work-orders/{id}/material-allocations` — no new write route. The
+   * body is `proposed_tie` minus `work_order_id` (the path parameter), with
+   * `part_id` optionally replaced by the planner's own shortlist pick.
+   * Server-gated: callers stay non-optimistic and refetch after a 201.
+   */
+  async tieNestSheet(tie: ProposedNestTie): Promise<MaterialAllocation> {
+    const { work_order_id: workOrderId, ...body } = tie;
+    const created = await this.createMaterialAllocation(workOrderId, body);
+    this.invalidateCache('/laser-nests');
+    return created;
   }
 
   // --- Material ties (work-order material allocations) ----------------------

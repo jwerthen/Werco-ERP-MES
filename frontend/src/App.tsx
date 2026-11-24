@@ -41,6 +41,7 @@ const PartDetail = lazyWithRetry(() => import('./pages/PartDetail'));
 const PartEdit = lazyWithRetry(() => import('./pages/PartEdit'));
 const BOM = lazyWithRetry(() => import('./pages/BOM'));
 const BOMUomMismatches = lazyWithRetry(() => import('./pages/BOMUomMismatches'));
+const UntiedLaserNests = lazyWithRetry(() => import('./pages/UntiedLaserNests'));
 const Routing = lazyWithRetry(() => import('./pages/Routing'));
 const ProcessSheets = lazyWithRetry(() => import('./pages/ProcessSheets'));
 const SetupWizard = lazyWithRetry(() => import('./pages/SetupWizard'));
@@ -524,6 +525,20 @@ function AppRoutes() {
               <Layout>
                 <LazyRoute>
                   <BOMUomMismatches />
+                </LazyRoute>
+              </Layout>
+            </PrivateRoute>
+          }
+        />
+        {/* Office worklist of laser nests with no sheet tied. Gated on work_orders:edit
+          (routeAccess.ts) to match the endpoints' ADMIN / MANAGER / SUPERVISOR gate. */}
+        <Route
+          path="/laser-nests/untied"
+          element={
+            <PrivateRoute>
+              <Layout>
+                <LazyRoute>
+                  <UntiedLaserNests />
                 </LazyRoute>
               </Layout>
             </PrivateRoute>

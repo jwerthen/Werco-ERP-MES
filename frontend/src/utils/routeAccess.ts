@@ -69,6 +69,10 @@ const routeAccessRequirements: RouteAccessRequirement[] = [
   // see), so it is gated on work_orders:edit — admin / manager / supervisor —
   // rather than the read-only work_orders:view that Scheduling uses.
   { prefix: '/dispatch', permission: 'work_orders:edit' },
+  // Untied laser nests: every /laser-nests/untied* read is require_role([ADMIN,
+  // MANAGER, SUPERVISOR]) — the same trio that may tie a sheet — which is exactly
+  // the work_orders:edit set.
+  { prefix: '/laser-nests', permission: 'work_orders:edit' },
   { prefix: '/documents', permission: 'work_orders:view' },
   { prefix: '/downtime', permission: 'work_orders:view' },
   { prefix: '/maintenance', permission: 'work_orders:view' },

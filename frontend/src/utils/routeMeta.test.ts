@@ -217,3 +217,10 @@ describe('formatTabTitle', () => {
     expect(formatTabTitle('Werco ERP')).not.toBe('Werco ERP · Werco ERP');
   });
 });
+
+describe('getRouteTitle — Untied Laser Nests', () => {
+  it('titles the worklist and its sheet-report view', () => {
+    expect(getRouteTitle(loc('/laser-nests/untied'))).toBe('Untied Laser Nests');
+    expect(getRouteTitle(loc('/laser-nests/untied', '?view=sheets'))).toBe('Untied Laser Nests');
+  });
+});

@@ -320,3 +320,28 @@ describe('API Tokens navigation', () => {
     expect(within(sidebar()).queryByRole('link', { name: 'API Tokens' })).not.toBeInTheDocument();
   });
 });
+
+describe('Layout sidebar — Untied Laser Nests', () => {
+  // Every /laser-nests/untied* read is require_role([ADMIN, MANAGER, SUPERVISOR]),
+  // which is exactly work_orders:edit. The nav entry and the route agree on it.
+  const UNTIED = 'Untied Laser Nests';
+
+  afterEach(() => {
+    mockUser.value = null;
+  });
+
+  it.each(['admin', 'manager', 'supervisor'])('shows the entry to %s, and the route lets them in', role => {
+    renderLayout(role, '/work-orders');
+    expect(hasNavEntry(UNTIED)).toBe(true);
+    const perms = getPermissionsForRole(role as any);
+    expect(canAccessPath('/laser-nests/untied', p => perms.includes(p))).toBe(true);
+  });
+
+  it.each(['quality', 'viewer', 'shipping'])('hides the entry from %s, and the route refuses them', role => {
+    renderLayout(role, '/work-orders');
+    expect(hasNavEntry(UNTIED)).toBe(false);
+    expect(hasNavEntry('Work Orders')).toBe(true);
+    const perms = getPermissionsForRole(role as any);
+    expect(canAccessPath('/laser-nests/untied?view=sheets', p => perms.includes(p))).toBe(false);
+  });
+});
