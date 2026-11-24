@@ -63,16 +63,48 @@ const parts = [
   { id: 8, part_number: 'PN-800', name: 'Plate', part_type: 'manufactured' },
 ];
 
-const lowStock = [{ part_id: 7, is_critical: true }];
+const lowStock = [
+  {
+    part_id: 7,
+    part_number: 'PN-700',
+    part_name: 'Bracket',
+    quantity_on_hand: 40,
+    reorder_point: 50,
+    reorder_quantity: 100,
+    safety_stock: 0,
+    shortage: 10,
+    is_critical: false,
+    out_of_stock: false,
+  },
+];
 
-const renderPage = () => render(<MemoryRouter><InventoryPage /></MemoryRouter>);
+// A part on the low-stock list with no stock row at all, so /inventory/summary never lists it.
+const outOfStock = {
+  part_id: 9,
+  part_number: 'PN-900',
+  part_name: 'Gusset',
+  quantity_on_hand: 0,
+  reorder_point: 20,
+  reorder_quantity: 40,
+  safety_stock: 5,
+  shortage: 20,
+  is_critical: true,
+  out_of_stock: true,
+};
+
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <InventoryPage />
+    </MemoryRouter>
+  );
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockedApi.getInventory.mockResolvedValue([] as any);
   mockedApi.getInventorySummary.mockResolvedValue(summary as any);
   mockedApi.getInventoryLocations.mockResolvedValue([] as any);
-  mockedApi.getLowStockAlerts.mockResolvedValue(lowStock as any);
+  mockedApi.getLowStockAlerts.mockResolvedValue(lowStock);
   mockedApi.getParts.mockResolvedValue(parts as any);
 });
 
@@ -111,4 +143,25 @@ test('toggling Show Low Stock surfaces the low-stock chip in the toolbar', async
 
   // …and the chip carries a clear-filter affordance.
   expect(screen.getByRole('button', { name: /Clear low stock filter/i })).toBeInTheDocument();
+});
+
+test('the low-stock view also lists a part that is completely out of stock', async () => {
+  mockedApi.getLowStockAlerts.mockResolvedValue([outOfStock, ...lowStock]);
+  mockedApi.getParts.mockResolvedValue([
+    ...parts,
+    { id: 9, part_number: 'PN-900', name: 'Gusset', part_type: 'manufactured' },
+  ] as any);
+  render(
+    <MemoryRouter initialEntries={['/warehouse?tab=inventory&filter=low_stock']}>
+      <InventoryPage />
+    </MemoryRouter>
+  );
+
+  // The chip count is the endpoint's length, and the table holds the same rows.
+  expect(await screen.findByText(/Showing 2 low stock/i)).toBeInTheDocument();
+  expect((await screen.findAllByText('PN-900')).length).toBeGreaterThan(0);
+  expect(screen.getAllByText('PN-700').length).toBeGreaterThan(0);
+  expect(screen.queryByText('PN-800')).toBeNull();
+  expect(screen.getAllByText('OUT OF STOCK').length).toBeGreaterThan(0);
+  expect(screen.getAllByText('LOW STOCK').length).toBeGreaterThan(0);
 });
