@@ -81,6 +81,12 @@ _KIOSK_DENIED_APPROVAL_SUFFIXES = ("/approve", "/unapprove")
 # READING their rank — the queue endpoint is a different path and stays allowed.
 _KIOSK_DENIED_RUN_ORDER_MARKER = "/work-centers/"
 _KIOSK_DENIED_RUN_ORDER_SUFFIXES = ("/run-order",)
+# The in-process inspection sign-off (POST /shop-floor/operations/{id}/inspection) records
+# AS9100D inspection evidence under the signer's name. Like labor approval it is a desk
+# verb: a 5-minute badge token left live on a shared crew terminal must not let whoever
+# stands there next sign an inspection in a Quality or Supervisor's name.
+_KIOSK_DENIED_INSPECTION_MARKER = "/operations/"
+_KIOSK_DENIED_INSPECTION_SUFFIXES = ("/inspection",)
 
 
 def _is_kiosk_scope_allowed_path(path: str) -> bool:
@@ -91,6 +97,8 @@ def _is_kiosk_scope_allowed_path(path: str) -> bool:
     if _KIOSK_DENIED_APPROVAL_MARKER in path and path.endswith(_KIOSK_DENIED_APPROVAL_SUFFIXES):
         return False
     if _KIOSK_DENIED_RUN_ORDER_MARKER in path and path.endswith(_KIOSK_DENIED_RUN_ORDER_SUFFIXES):
+        return False
+    if _KIOSK_DENIED_INSPECTION_MARKER in path and path.endswith(_KIOSK_DENIED_INSPECTION_SUFFIXES):
         return False
     for prefix in KIOSK_TOKEN_PATH_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):

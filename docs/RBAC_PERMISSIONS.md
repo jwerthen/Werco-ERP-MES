@@ -193,7 +193,10 @@ its re-verification, and a CAR's effectiveness verification), the floor-PIN chan
 PIN policy, is credential administration, a person's act), and the restricted document viewing
 change of 2026-11-19 (migration `131`: a document's access level and a user's export authorization),
 and the owner's decision of 2026-11-20 that a standing API token may file a maintenance log entry
-(an MCP agent on a person's own JWT too, a half not separately put to the owner).
+(an MCP agent on a person's own JWT too, a half not separately put to the owner), and the in-process
+inspection sign-off change of 2026-11-23 (signing that an inspection was performed is a person's
+judgment, as an FAI final disposition is; a default taken from the improvement plan, not an owner
+ruling).
 This section is the **one list** of those credential rules — what refuses a credential,
 what is deliberately left open (and who decided each), and what is deliberately not refused —
 across the AI governance (ruling 3), floor-gates (ruling 2) and short-count (ruling 1) changes;
@@ -216,7 +219,7 @@ list of credential predicates.
 Writes that apply them — each refused before any write and before any audit row (the 403 texts
 live in `ai_action_applier.py` and `operation_action_gates.py`, for the quality judgments in
 `quality_record_service.py` and `fai_service.py`, for export control
-`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes and the document-access writes `app/core/credentials.py`, and for the supplier-approval rows
+`app/api/endpoints/customers.py`, for the egress switches, the comment writes, the floor-PIN writes, the document-access writes and the inspection sign-off `app/core/credentials.py`, and for the supplier-approval rows
 `app/services/supplier_approval_service.py` and `app/api/endpoints/purchasing.py`, for the maintenance
 checklist `app/services/maintenance_checklist.py`; where each sits in its route's
 check order is in `docs/API.md` → Work Orders → "Short count at completion" and → AI
@@ -252,6 +255,7 @@ Recommendations):
 | **Changing a document's access level** — `POST /documents/{id}/access-level` (`standard` / `restricted` / `export_controlled`, applied to the document's whole revision history). Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either: an agent must not lower an export-controlled drawing to `standard`. The access review (`GET /documents/access-review`, the MCP tool `get_document_access_review`) and every document read stay open to a token the read gates admit | `is_api_token_credential`, inline at the top of the route (after the Admin / Quality role gate) | **403** `API_TOKEN_DOCUMENT_ACCESS_LEVEL` (`A document's access level is changed by an Admin or Quality user signed in to the app, not an API token: deciding who may open a controlled document is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | Design decision of the restricted document viewing change (2026-11-19, migration `131`), applying the egress-switch reasoning of 2026-11-15; not an owner ruling |
 | **Granting or revoking a user's export authorization** — `PUT /users/{id}/export-authorization`, the only thing that opens an `export_controlled` document. Refused before anything is read. Not an MCP tool (`catalog.DOCUMENT_ACCESS_OPERATIONS`): an agent on a person's JWT must not grant export access, its own user's included. Reading a user's authorization (the user record) stays open | `is_api_token_credential`, inline at the top of the route (after the Admin role gate) | **403** `API_TOKEN_EXPORT_AUTHORIZATION` (`Export authorization is granted or revoked by an Admin signed in to the app, not an API token: deciding who may open export-controlled documents is a person's judgment.`) — any token, whatever its role or scope | The same 2026-11-19 design decision; not an owner ruling |
 | **Changing your own password** — `POST /users/change-password` (any signed-in person, My Settings → Password). Refused before the body's passwords are read. Not an MCP tool (`catalog.PASSWORD_OPERATIONS`, part of `EXCLUDED_OPERATIONS`): an agent on a person's own JWT must not change that person's password. The change, its `password_changed_at` stamp and the `PASSWORD_CHANGE` audit row are one transaction — the audit row is **required** evidence (**503**, nothing saved). It does not end the person's other signed-in sessions (refresh does not read `password_changed_at`; they last until sign-out or the 7-day idle window) | `is_interactive_person`, inline at the top of the route | **403** `PASSWORD_CHANGE_PEOPLE_ONLY` (`Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station token cannot change a password.`) — every API token whatever its role or scope, and every crew-station badge or station token | The self-service password change's design (2026-11-23); not an owner ruling |
+| **Signing off an in-process inspection** — `POST /shop-floor/operations/{operation_id}/inspection`, the only writer of `WorkOrderOperation.inspection_complete` (the generic `PUT /work-orders/operations/{id}` refuses the field **422**). It records that an inspection was performed, under the signer's name, as a **required** `MARK_OPERATION_INSPECTED` audit row (**503**, nothing signed, when it cannot be written). Refused after the role gate and before the operation is read, so a token cannot probe whether an id exists. Not an MCP tool (`catalog.INSPECTION_SIGN_OFF_OPERATIONS`, part of `EXCLUDED_OPERATIONS`), so a person's own JWT cannot reach it through an agent either. A crew-station badge token, which passes `is_api_token_credential`, is refused **403** by the kiosk path fence instead (`deps._is_kiosk_scope_allowed_path`), as labor approval is, whatever badge was scanned. The operation reads carrying `requires_inspection` / `inspection_complete` / `inspection_type` stay open | `is_api_token_credential`, inline at the top of the route (after the role gate) | **403** `API_TOKEN_INSPECTION_SIGN_OFF` (`An inspection is signed off by a person signed in to the app, not an API token: recording that an inspection was performed is a person's judgment.`) — any token, whatever its role or scope (a read-only or AI-external token meets its own gate's 403 first) | The inspection sign-off change (2026-11-23): the improvement plan's recommended default, matching the FAI final disposition; not an owner ruling. Fencing the badge token off is the same change's review follow-up |
 
 Deliberately **not** refused:
 
@@ -259,7 +263,8 @@ Deliberately **not** refused:
   passes every `is_api_token_credential` rule above. For declaring scrap and closing work short that
   is the owner's decision (it names the crew badge: "kiosk, crew badge, desk"); for the count-judgment
   and scrap-reason rows it is this PR's reading. (`is_interactive_person` refuses it, and its path
-  fence keeps it on `/api/v1/shop-floor` anyway.)
+  fence keeps it on `/api/v1/shop-floor` anyway.) The in-process inspection sign-off is the one
+  shop-floor row above it cannot reach: the path fence denies that route to every badge token.
 - An agent presenting a **person's own interactive access JWT** (an MCP client signed in as that
   person) is that person's session to both predicates and is not refused — current behavior, not an
   owner decision. The 2026-11-07 decision
@@ -2338,6 +2343,15 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > `require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY])` (`app/api/endpoints/shop_floor.py`,
 > `mark_operation_inspected`). The role set matches the matrix exactly — this repo has no separate
 > `INSPECTOR` role, so operation inspection is performed by Admin / Manager / Supervisor / Quality.
+> It is the flag's **only** writer: `PUT /work-orders/operations/{id}` refuses `inspection_complete`
+> **422**. On top of the role gate, only a person may sign: any standing API token is **403**
+> (`API_TOKEN_INSPECTION_SIGN_OFF`, see
+> [Credential policy for judgment writes](#credential-policy-for-judgment-writes)), a crew-station
+> badge token is **403** by the kiosk path fence whatever its role, and the route is not an MCP
+> tool. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed). The
+> app offers **Sign off** on Work Order Detail operation rows and Shop Floor operation cards to the
+> same four roles (plus Platform Admin and superusers, whom `require_role` admits); every other role
+> sees the "Inspection required" / "Inspected" chip only.
 >
 > **FAI evidence has separate authoring and final-disposition gates.** Every FAI/characteristic
 > write, including prefill, requires Admin / Manager / Supervisor / Quality. Setting a final status

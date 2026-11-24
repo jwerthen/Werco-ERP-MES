@@ -134,6 +134,18 @@ COMMENT_WRITE_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the in-process inspection sign-off (AS9100D 8.6): recording that an inspection was
+# performed is a person's judgment, like an FAI final disposition. The route refuses every API
+# token (``app.core.credentials.API_TOKEN_INSPECTION_SIGN_OFF``), and a person's own JWT would
+# still reach it through a tool call -- an agent signing an inspection nobody did -- so it is not
+# a tool. The operation reads (``requires_inspection`` / ``inspection_complete``) stay tools.
+# Named on its own so the credential tests walk exactly this route.
+INSPECTION_SIGN_OFF_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/shop-floor/operations/{operation_id}/inspection"),
+    }
+)
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
@@ -168,6 +180,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     | PASSWORD_OPERATIONS
     | DOCUMENT_ACCESS_OPERATIONS
     | COMMENT_WRITE_OPERATIONS
+    | INSPECTION_SIGN_OFF_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None

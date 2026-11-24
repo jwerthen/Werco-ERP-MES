@@ -1,11 +1,13 @@
 """Shared production and hold inputs for canonical ERP and reviewed Hank commands."""
 
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.time_entry import TimeEntrySource
 from app.models.work_order_blocker import WorkOrderBlockerCategory, WorkOrderBlockerSeverity
+from app.schemas.base import UTCModel
 
 
 class ProductionReportRequest(BaseModel):
@@ -148,3 +150,34 @@ class OperationHoldRequest(BaseModel):
         "for the bulk-migration loaders); a kiosk-scoped operator token forces 'kiosk' regardless of "
         "this hint.",
     )
+
+
+class OperationInspectionRequest(BaseModel):
+    """Sign off an operation's in-process inspection (``POST /shop-floor/operations/{id}/inspection``).
+
+    ``inspection_type`` optionally records WHICH inspection cleared the gate
+    (first_article / in_process / final); ``notes`` carries inspector commentary.
+    Both land in the audit row so the inspection sign-off is traceable.
+    """
+
+    inspection_type: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
+class OperationInspectionResponse(UTCModel):
+    """What the inspection sign-off answers.
+
+    ``signed_off_by_*`` / ``signed_off_at`` describe THIS sign-off and are read from the audit
+    row it just wrote. The operation itself has no inspected-by / inspected-at column yet, so no
+    read model carries them; the audit row is the record of who signed and when.
+    """
+
+    message: str
+    operation_id: int
+    work_order_id: int
+    requires_inspection: bool
+    inspection_complete: bool
+    inspection_type: Optional[str] = None
+    signed_off_by_id: int
+    signed_off_by_name: str
+    signed_off_at: datetime

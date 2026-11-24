@@ -4,6 +4,7 @@ import CommentsPanel from '../components/comments/CommentsPanel';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { InspectionSignOffControl, canSignOffInspection } from '../components/quality/InspectionSignOff';
 import {
   OfficeOperationCompleteResult,
   OperationHold,
@@ -584,6 +585,9 @@ export default function WorkOrderDetail() {
   // operation now consumes tied material, so this button moves stock and writes
   // hash-chain rows. Operators complete work from the shop floor / kiosk.
   const canCompleteOperation = canCorrectCount || user?.role === 'quality';
+  // In-process inspection sign-off: POST /shop-floor/operations/{id}/inspection is
+  // require_role([ADMIN, MANAGER, SUPERVISOR, QUALITY]) and refuses API tokens.
+  const canSignOff = canSignOffInspection(user);
   // Duplicate is require_role([ADMIN, MANAGER, SUPERVISOR]) on the backend —
   // the same trio work_orders:edit maps to. Named separately from
   // canCorrectCount so the gate reads at its call site: hiding the control and
@@ -3090,6 +3094,24 @@ export default function WorkOrderDetail() {
                           <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColor(op.status)}`}>
                             {cancelledNest ? 'Nest cancelled' : op.status.replace('_', ' ')}
                           </span>
+                          {/* In-process inspection point: "Inspection required" until the
+                              audited sign-off is recorded, then "Inspected". The Sign off
+                              button is offered to the route's four roles only and is
+                              NON-optimistic -- the chip flips from the re-read. */}
+                          {(op.requires_inspection || op.inspection_complete) && (
+                            <div className="mt-1.5">
+                              <InspectionSignOffControl
+                                operationId={op.id}
+                                operationLabel={`${operationLabel(op)} \u2014 ${op.name}`}
+                                requiresInspection={Boolean(op.requires_inspection)}
+                                inspectionComplete={Boolean(op.inspection_complete)}
+                                inspectionType={op.inspection_type}
+                                /* A cancelled nest keeps its chip but is not signable. */
+                                canSignOff={canSignOff && !cancelledNest}
+                                onSignedOff={() => loadWorkOrder()}
+                              />
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-3">

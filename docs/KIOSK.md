@@ -1548,11 +1548,13 @@ every station-login failure write tamper-evident audit rows.
   token** — a shared terminal never holds a long-lived personal credential. The token lives in
   memory only (never persisted) and is **path-fenced in `get_current_user`** to
   `/api/v1/shop-floor/*` plus `/api/v1/auth/employee-logout`; any other path returns **403**.
-  Three carve-outs inside the shop-floor prefix are **denied** to kiosk-scoped tokens even for
+  Four carve-outs inside the shop-floor prefix are **denied** to kiosk-scoped tokens even for
   MANAGER/ADMIN badges: the station lifecycle endpoints (`/shop-floor/kiosk-stations/*` — a
   scanned manager badge must not be able to reset a station PIN from the shared terminal), the
   labor-approval pair (`/shop-floor/time-entries/{id}/approve|unapprove` — G5-A approval is
-  a desktop supervisor workflow), and the manager dispatch tools
+  a desktop supervisor workflow), the in-process inspection sign-off
+  (`POST /shop-floor/operations/{id}/inspection` — likewise a desk verb, so a badge left live on the
+  terminal cannot sign an inspection in a Quality or Supervisor's name), and the manager dispatch tools
   (`GET /shop-floor/dispatch-board` and every route under it — a prefix rule, so the work-order
   plan routes are covered too — and `PUT /shop-floor/work-centers/{id}/run-order` — reading
   the whole shop's board, or dictating what every machine runs next, is a desk workflow). The

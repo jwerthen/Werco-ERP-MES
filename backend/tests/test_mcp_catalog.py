@@ -34,6 +34,7 @@ from app.mcp.catalog import (
     EXCLUDED_OPERATIONS,
     EXCLUDED_TAGS,
     FLOOR_PIN_OPERATIONS,
+    INSPECTION_SIGN_OFF_OPERATIONS,
     JSON_CONTENT_TYPE,
     MAX_DESCRIPTION_CHARS,
     MULTIPART_CONTENT_TYPE,
@@ -154,8 +155,10 @@ class TestMembership:
         # comment is a person's own words), the four badge-sign-on credential writes
         # (AS9100D 8.5.2: setting, clearing or unlocking a floor PIN and the company's PIN policy are a
         # person's act) and the two document-access writes (AS9100D 7.5.3: granting export
-        # authorization and changing a document's access level are a person's judgment) and the
-        # self-service password change (a person's act in their own session) -- nothing else.
+        # authorization and changing a document's access level are a person's judgment), the
+        # self-service password change (a person's act in their own session) and the in-process
+        # inspection sign-off (AS9100D 8.6: signing that an inspection was performed is a person's
+        # judgment, like an FAI final disposition) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -186,8 +189,10 @@ class TestMembership:
             ("PUT", "/api/v1/users/{user_id}/export-authorization"),
             ("POST", "/api/v1/documents/{document_id}/access-level"),
             ("POST", "/api/v1/users/change-password"),
+            ("POST", "/api/v1/shop-floor/operations/{operation_id}/inspection"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert INSPECTION_SIGN_OFF_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert DOCUMENT_ACCESS_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert FLOOR_PIN_OPERATIONS <= set(EXCLUDED_OPERATIONS)
@@ -208,6 +213,17 @@ class TestMembership:
         }.isdisjoint(names)
         assert by_key[("GET", "/api/v1/admin/settings/shipping-profile")] == "get_shipping_profile"
         assert by_key[("GET", "/api/v1/receiving/print-profile")] == "get_print_profile"
+
+    def test_signing_off_an_inspection_is_never_a_tool(self, catalog):
+        """Signing that an in-process inspection was performed is a person's judgment (like an FAI
+        final disposition). The route refuses every API token, but a person's own JWT reaches a
+        tool -- so the sign-off is not a tool at all. The operation read that carries
+        ``inspection_complete`` stays a tool."""
+        by_key = {tool.key: tool.name for tool in catalog}
+        for key in INSPECTION_SIGN_OFF_OPERATIONS:
+            assert key not in by_key, key
+        assert "mark_operation_inspected" not in set(by_key.values())
+        assert ("GET", "/api/v1/shop-floor/operations/{operation_id}") in by_key
 
     def test_writing_a_comment_or_changing_a_watch_is_never_a_tool(self, catalog):
         """Owner decision 2026-11-16: a comment is a person's own words. The routes refuse every

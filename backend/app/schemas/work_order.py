@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
@@ -16,6 +16,12 @@ from app.core.validation import (
 from app.models.laser_nest import MAX_PLANNED_RUNS
 from app.models.work_order import OperationStatus, WorkOrderStatus, WorkOrderType
 from app.schemas.base import UTCModel
+
+# Answered (422) to a generic operation update that sends ``inspection_complete``.
+INSPECTION_COMPLETE_NOT_UPDATABLE = (
+    "inspection_complete cannot be set by an operation update. Sign off the inspection with "
+    "POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when."
+)
 
 
 def _serialize_decimal_as_number(value: Optional[Decimal]) -> Optional[float]:
@@ -498,7 +504,17 @@ class WorkOrderOperationUpdate(BaseModel):
         description="Reason for scrapped parts; required when quantity_scrapped > 0, ignored otherwise.",
     )
     requires_inspection: Optional[bool] = None
-    inspection_complete: Optional[bool] = None
+    # ``inspection_complete`` is deliberately NOT a field: the audited sign-off
+    # ``POST /shop-floor/operations/{id}/inspection`` is its only writer (who signed and when lives
+    # in that verb's required audit row). A body that still sends it is refused below rather than
+    # silently ignored, so a caller that thinks it signed an inspection is told it did not.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_inspection_complete(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "inspection_complete" in data:
+            raise ValueError(INSPECTION_COMPLETE_NOT_UPDATABLE)
+        return data
 
     @model_validator(mode="after")
     def _require_scrap_reason(self) -> "WorkOrderOperationUpdate":
