@@ -207,7 +207,7 @@ def test_ship_withholds_the_automatic_coc_and_records_why(client: TestClient, db
     manager = make_user(db_session, role=UserRole.MANAGER)
     wo, ncr, shipment = _ship_with_open_ncr(db_session)
 
-    resp = _ship(client, shipment, manager)
+    resp = _accept(client, db_session, shipment, manager)
     assert resp.status_code == status.HTTP_200_OK, resp.text
     body = resp.json()
     assert body["coc_withheld"] is True
@@ -298,6 +298,132 @@ def test_api_token_refused_on_issue(client: TestClient, db_session: Session):
 
 
 def _ship_over(client: TestClient, db: Session, shipment, user):
-    resp = _ship(client, shipment, user)
+    resp = _accept(client, db, shipment, user)
     assert resp.status_code == status.HTTP_200_OK, resp.text
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Step 3: shipping over open items needs a named person's acknowledged reason.
+# ---------------------------------------------------------------------------
+
+
+def _shipment_status(db: Session, shipment):
+    from app.models.shipping import Shipment
+
+    db.expire_all()
+    return db.get(Shipment, shipment.id).status
+
+
+def test_ship_over_open_items_is_409_listing_them_and_writes_nothing(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    shipper = make_user(db_session, role=UserRole.SHIPPING)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    resp = _ship(client, shipment, shipper)
+    assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "release_exceptions_open"
+    assert "accept them with a reason" in detail["message"]
+    assert [e["reference_id"] for e in detail["release_exceptions"]] == [ncr.id]
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.PENDING
+    assert _audit(db_session, "COC_WITHHELD") == []
+
+
+def test_shipping_role_cannot_acknowledge(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    shipper = make_user(db_session, role=UserRole.SHIPPING)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    resp = _accept(client, db_session, shipment, shipper)
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    assert "Admin, Manager or Quality" in resp.json()["detail"]
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.PENDING
+
+
+def test_acknowledgment_needs_a_reason(client: TestClient, db_session: Session):
+    from app.models.user import UserRole
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    resp = client.post(
+        f"/api/v1/shipping/{shipment.id}/ship",
+        json={"acknowledge_exceptions": True},
+        headers=headers_for(manager),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_api_token_cannot_acknowledge(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    resp = client.post(
+        f"/api/v1/shipping/{shipment.id}/ship",
+        json={"acknowledge_exceptions": True, "reason": "Agent says fine"},
+        headers=_token_headers(client, db_session, manager),
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    assert "API token" in resp.json()["detail"]
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.PENDING
+
+
+def test_quality_accepts_and_ships_with_required_audit(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    resp = _accept(client, db_session, shipment, quality)
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.SHIPPED
+    rows = [r for r in _audit(db_session, "SHIPPED_OVER_QUALITY_EXCEPTIONS") if r.resource_id == shipment.id]
+    assert len(rows) == 1
+    assert rows[0].extra_data["reason"] == "Customer accepted per deviation D-1"
+    assert rows[0].extra_data["release_exceptions"][0]["reference_id"] == ncr.id
+
+
+def test_quality_cannot_ship_a_clean_job(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo = make_wo(db_session, make_part(db_session))
+    shipment = make_shipment(db_session, wo)
+    db_session.commit()
+    resp = _ship(client, shipment, quality)
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.PENDING
+
+
+def test_api_token_still_ships_a_clean_job(client: TestClient, db_session: Session):
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+
+    shipper = make_user(db_session, role=UserRole.SHIPPING)
+    wo = make_wo(db_session, make_part(db_session))
+    shipment = make_shipment(db_session, wo)
+    db_session.commit()
+    resp = client.post(f"/api/v1/shipping/{shipment.id}/ship", headers=_token_headers(client, db_session, shipper))
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.SHIPPED
+
+
+def test_required_audit_failure_rolls_the_ship_back(client: TestClient, db_session: Session):
+    from unittest.mock import patch
+
+    from app.models.shipping import ShipmentStatus
+    from app.models.user import UserRole
+    from app.services.audit_service import AuditWriteError
+
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    wo, ncr, shipment = _ship_with_open_ncr(db_session)
+    with patch("app.api.endpoints.shipping.record_ship_over_exceptions", side_effect=AuditWriteError("chain down")):
+        resp = _accept(client, db_session, shipment, manager)
+    assert resp.status_code == 503, resp.text
+    assert "not shipped" in resp.json()["detail"]
+    assert _shipment_status(db_session, shipment) == ShipmentStatus.PENDING

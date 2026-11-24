@@ -75,6 +75,10 @@ from app.services.shipment_commands import generate_shipment_number as _generate
 from app.services.shipment_release_service import (
     API_TOKEN_COC_ISSUE,
     COC_OVER_EXCEPTIONS_MESSAGE,
+    QUALITY_SHIP_ONLY_OVER_EXCEPTIONS,
+    SHIP_OVER_EXCEPTIONS_MESSAGE,
+    is_quality_only_shipper,
+    record_ship_over_exceptions,
     require_release_acknowledgment,
 )
 from app.services.shipping_service import ShippingService
@@ -95,6 +99,9 @@ CARRIER_WRITE_ROLES = [UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, Us
 
 COC_WITHHELD_AUDIT_UNAVAILABLE = (
     "The record of the withheld Certificate of Conformance could not be saved; the shipment was not shipped. Retry."
+)
+SHIP_ACCEPTANCE_AUDIT_UNAVAILABLE = (
+    "The record of the accepted quality items could not be saved; the shipment was not shipped. Retry."
 )
 COC_ACCEPTANCE_AUDIT_UNAVAILABLE = (
     "The record of the accepted quality items could not be saved; no certificate was issued. Retry."
@@ -353,19 +360,29 @@ def create_shipment(
 def mark_shipped(
     shipment_id: int,
     tracking_number: Optional[str] = None,
+    acknowledgment: Optional[ReleaseExceptionAcknowledgment] = Body(None),
     db: Session = Depends(get_db),
     # RBAC (docs/RBAC_PERMISSIONS.md -> Shipping -> "Complete"): marking a shipment shipped
     # is the terminal shipping action that CLOSES the work order, so it is gated to the
     # documented Shipping-Complete role set (ADMIN / MANAGER / SUPERVISOR / SHIPPING). This
     # is an intentional behavior change: non-privileged tenant users now get 403 (previously
     # any authenticated user could close a WO by shipping).
+    # shipping/2: QUALITY is admitted only to accept open quality items (refused 403 on a
+    # job with nothing open -- see is_quality_only_shipper).
     current_user: User = Depends(
-        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING])
+        require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR, UserRole.SHIPPING, UserRole.QUALITY])
     ),
     company_id: int = Depends(get_current_company_id),
     audit: AuditService = Depends(get_audit_service),
 ):
-    """Mark shipment as shipped"""
+    """Mark a shipment shipped (closes the work order once fully shipped).
+
+    When the job has open quality items (the shipment's ``release_exceptions``) this
+    answers 409 listing them unless the body carries ``acknowledge_exceptions: true`` and
+    a ``reason`` from Admin, Manager or Quality (never a standing API token). The
+    acceptance is required audit evidence, and the required certificate is then withheld
+    for Quality to issue. Shipping and Supervisor ship a job with nothing open.
+    """
     # G2: lock the shipment row while we re-check status + write the offsetting FG
     # decrement, so a concurrent double-ship can't both pass the idempotency guard and
     # double-decrement on-hand. (with_for_update is a no-op on SQLite used by tests.)
@@ -430,6 +447,11 @@ def mark_shipped(
         [exc.as_dict() for exc in shipment_release_exceptions(db, company_id, [wo.id]).get(wo.id, [])] if wo else []
     )
     coc_withheld = False
+    acceptance_reason = require_release_acknowledgment(
+        current_user, acknowledgment, release_exceptions, message=SHIP_OVER_EXCEPTIONS_MESSAGE
+    )
+    if not release_exceptions and is_quality_only_shipper(current_user):
+        raise HTTPException(status_code=403, detail=QUALITY_SHIP_ONLY_OVER_EXCEPTIONS)
 
     shipment.status = ShipmentStatus.SHIPPED
     shipment.ship_date = date.today()
@@ -538,6 +560,17 @@ def mark_shipped(
         # generation is BEST-EFFORT and idempotent (DB-enforced per shipment): a failure
         # here must never fail the ship, so it is wrapped and recorded as a warning
         # OperationalEvent (mirrors the warn-and-record posture of the FG/over-ship guards).
+        if release_exceptions and acceptance_reason is not None:
+            with required_audit(db, SHIP_ACCEPTANCE_AUDIT_UNAVAILABLE):
+                record_ship_over_exceptions(
+                    audit,
+                    shipment=shipment,
+                    work_order=wo,
+                    exceptions=release_exceptions,
+                    reason=acceptance_reason,
+                    company_id=company_id,
+                )
+
         coc_required = coc_required_for_shipment(db, work_order=wo, shipment=shipment, company_id=company_id)
         if coc_required and release_exceptions:
             # shipping/2: open quality items on the job -- the certificate states the parts

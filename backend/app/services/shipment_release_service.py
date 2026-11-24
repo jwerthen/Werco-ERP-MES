@@ -90,3 +90,47 @@ def require_release_acknowledgment(
     if len(reason) < RELEASE_ACK_REASON_MIN_LENGTH:
         raise HTTPException(status_code=422, detail=RELEASE_ACK_REASON_DETAIL)
     return reason
+
+
+SHIPPED_OVER_EXCEPTIONS_AUDIT_ACTION = "SHIPPED_OVER_QUALITY_EXCEPTIONS"
+
+
+def is_quality_only_shipper(user: Any) -> bool:
+    """Quality is on the ship route only to accept open items, never to ship a clean job."""
+    if getattr(user, "is_superuser", False) or getattr(user, "role", None) == UserRole.PLATFORM_ADMIN:
+        return False
+    return getattr(user, "role", None) == UserRole.QUALITY
+
+
+def record_ship_over_exceptions(
+    audit: Any,
+    *,
+    shipment: Any,
+    work_order: Any,
+    exceptions: List[dict],
+    reason: str,
+    company_id: int,
+) -> None:
+    """REQUIRED audit evidence that a person shipped over open quality items, with their reason.
+
+    The caller wraps it in ``app.api.audit_guard.required_audit`` so a failure rolls the
+    whole ship back (503). Never commits.
+    """
+    audit.log_required(
+        SHIPPED_OVER_EXCEPTIONS_AUDIT_ACTION,
+        "shipment",
+        resource_id=shipment.id,
+        resource_identifier=shipment.shipment_number,
+        description=(
+            f"Shipment {shipment.shipment_number} (WO {work_order.work_order_number}) shipped over "
+            f"{len(exceptions)} open quality item(s): {reason}"
+        ),
+        new_values={"accepted_release_exceptions": [exc.get("code") for exc in exceptions]},
+        extra_data={
+            "work_order_id": work_order.id,
+            "work_order_number": work_order.work_order_number,
+            "release_exceptions": exceptions,
+            "reason": reason,
+        },
+        company_id=company_id,
+    )
