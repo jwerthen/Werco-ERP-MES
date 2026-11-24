@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **794 tools** — 16 hand-written *convenience* tools plus
+**778 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -125,7 +125,8 @@ log entries*.
 Certificate of Conformance (`POST /shipping/{id}/coc`) left the catalog (`EXCLUDED_OPERATIONS`,
 §6.1), and `mark_shipped` became a **convenience** tool under the same name (§7), shadowing its raw
 route (§8), so an agent can ship but can never send the acknowledgment that accepts open quality
-items: 16 convenience + **778** generated, 17 shadowed. No existing name shifted.
+items: 16 convenience + **778** generated, 17 shadowed. No existing name shifted. Both routes are
+writes, so the read-only catalog is unchanged at 8 convenience + **304** generated.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -208,7 +209,7 @@ backend/app/mcp/
   auth.py         AuthContext; TokenSource (static -> refresh -> password login); ErpTokenVerifier
                   (an access JWT by signature, an API token by its api_tokens row)
   executor.py     InProcessExecutor (httpx.ASGITransport into app) / RemoteExecutor (HTTPS)
-  convenience.py  the 15 hand-written tools + SHADOWED_OPERATIONS (16 raw routes they replace)
+  convenience.py  the 16 hand-written tools + SHADOWED_OPERATIONS (17 raw routes they replace)
   people_only.py  people_only_refusal(): Hank task kinds an agent never runs, on any credential (§4.3)
   server.py       build_server(): registry, per-call auth, jsonschema validation, dispatch
   http.py         McpDoor + mount_mcp(app): the Streamable HTTP door at WERCO_MCP_HTTP_PATH
@@ -854,7 +855,7 @@ minus two further, named sets:
   They are listed **by name** rather than skipped silently, so a new route that forgets its
   `security` dependency — even under a tag that already has tools — fails the coverage guard
   (`catalog.unaccounted_operations`, §14) until it is either secured or named there.
-- **`EXCLUDED_OPERATIONS`** — twenty-six operations, none with a convenience twin:
+- **`EXCLUDED_OPERATIONS`** — twenty-seven operations, none with a convenience twin:
   - The two Excel-cutover loaders, `POST /work-orders/import` and
     `POST /purchasing/purchase-orders/import` (`migration_import_service`). They record a *past*
     system's state rather than perform a user action: the work-order loader mints work orders
@@ -935,6 +936,15 @@ minus two further, named sets:
     The reads stay tools: `get_document_access_review`, the `access_level` on every document read,
     and each user's export authorization on `list_users`. See
     [API.md → Restricted and export-controlled documents](API.md#restricted-and-export-controlled-documents-as9100d-7531).
+  - **Issuing a Certificate of Conformance**, `POST /shipping/{shipment_id}/coc` (shipping/2,
+    2026-11-23). The certificate states that the shipped parts conform, and over open quality
+    items it accepts them with a reason: a named person's quality judgment. The route refuses every
+    API token **403** (`shipment_release_service.API_TOKEN_COC_ISSUE`), and the exclusion closes the
+    door a person's own JWT would leave open. The reads stay tools:
+    `get_certificate_of_conformance` and `download_certificate_of_conformance_pdf`. Its sibling,
+    shipping over open items, is handled the other way: the ship route is **shadowed** by the
+    `mark_shipped` convenience tool, which never sends the acknowledgment (§7, §8). See
+    [API.md → Shipping](API.md#shipping).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -951,7 +961,9 @@ three report-template routes then made it **770 generated tools**, and on 2026-1
 re-verification and CAR effectiveness verbs **772**, the five PO quality flow-down routes
 **777**, the inventory ownership route (migration 129) **778**, and the document access review
 (migration 131) **779**; the four floor-PIN writes and the two document-access writes joined the
-exclusions (twenty-six) without changing the count.
+exclusions (twenty-six) without changing the count. The maintenance log list then made it **780**,
+and on 2026-11-23 the CoC issue joined the exclusions (twenty-seven) and the ship route was
+shadowed by `mark_shipped` (17 shadowed): **778 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

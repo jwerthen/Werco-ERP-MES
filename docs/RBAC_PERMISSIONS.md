@@ -2319,6 +2319,12 @@ contract; they do not bypass tenant scoping or the read-only context fence.
 > snapshot). Quality's frontend permission set carries `shipping:view` (read only, no create or
 > complete) so the Shipping list, where the withheld certificate is issued, and the packing slip
 > are reachable; the server's shipping reads were already open to any authenticated tenant user.
+> The backend default (`role_permission.DEFAULT_ROLE_PERMISSIONS`) gains it too, so Quality also
+> gets what reads `shipping:view` there: the Shipping section of Hank's shift briefing and Hank's
+> shipping packet, plus, in the SPA, the Shipping Outlook dashboard widget, the Warehouse and
+> Shipping navigation and the packing-slip / shipping-label print pages. A company whose Quality role
+> carries a **stored** permission override keeps that override unchanged; add `shipping:view` to it
+> in role administration for Quality to reach the Shipping list.
 > Both writes refuse a standing API token (see
 > [Credential policy for judgment writes](#credential-policy-for-judgment-writes)); issuing the CoC
 > is not an MCP tool, and the `mark_shipped` MCP tool is a convenience tool that never sends an
@@ -2919,7 +2925,7 @@ role permissions:
 | Open CARs and Pending FAIs tiles, Quality Pulse panel | `quality:view` | Admin, Manager, Supervisor, Quality, Viewer |
 | Overdue / Due Today work-order lists, Late Jobs, Blocked Jobs, Today's Output, Active Downtime, Maintenance Due | `work_orders:view` | All |
 | Inspection Queue | `receiving:view` | Admin, Manager, Supervisor, Quality, Viewer |
-| Shipping Outlook | `shipping:view` | Admin, Manager, Supervisor, Shipping, Viewer |
+| Shipping Outlook | `shipping:view` | Admin, Manager, Supervisor, Quality, Shipping, Viewer |
 | Delivery & Yield KPIs, Visitors On Site | Admin, Manager or Supervisor **role** (mirrors the endpoints' `require_role`, so a permission override cannot widen it) | Admin, Manager, Supervisor |
 
 Superusers pass every rule; Platform Admins pass every rule except Setup progress, which checks for

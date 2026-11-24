@@ -229,15 +229,15 @@ The new shipment appears in **Recent Shipments** with a **pending** status.
 
 1. In **Recent Shipments**, find your pending shipment.
 2. Click **Ship** in the **Actions** column.
-3. When prompted, enter the **tracking number** (or leave it blank if there isn't one) and confirm.
+3. A confirmation box opens. If the job has open quality items (an open NCR, a first article not passed, or a quality hold), they are listed there. With nothing open, click **Mark shipped**. With items open, only Admin, Manager or Quality can ship: they tick the box to accept the items and give a reason, then click **Accept and ship**. Anyone else sees the list and a note to get one of them.
 
-The status changes to **shipped**.
+The status changes to **shipped**. When the customer needs a Certificate of Conformance it is issued at that moment and its number appears in the **CoC** column. If quality items were accepted to ship, the column reads **CoC withheld, Quality to issue** instead, and Quality issues it from the row with **Issue CoC**.
 
 ### Print the packing slip
 
 In the **Recent Shipments** row, click the **printer icon** in the **Actions** column. The packing slip opens in a new tab, ready to print and put in the box.
 
-> Tip: You can print the packing slip before or after marking it shipped — the printer icon is always available on the row.
+> Tip: You can print the packing slip before or after marking it shipped — the printer icon is always available on the row. The certificate is different: it exists only after **Ship**, so mark the shipment shipped, then reopen the packing slip and use **Print certificate** (or click the CoC number on the row) to print it.
 
 ---
 

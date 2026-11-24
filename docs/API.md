@@ -8088,7 +8088,10 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 > the system records a tamper-evident `audit_log` row (action `COMPLETED_WITH_QUALITY_EXCEPTION`) plus
 > a warning operational event for each. The gates are: `inspection_incomplete` (operation requires
 > inspection but `inspection_complete` is not set), `open_ncr` (an unresolved NCR on the work order),
-> `fai_not_passed` (a First Article Inspection on the work order that is not `PASSED`), `open_blocker`
+> `fai_not_passed` (the **latest** First Article Inspection per part on the work order -- newest
+> `created_at`, `id` breaking ties -- is not accepted: `PASSED`, or `CONDITIONAL` with the customer's
+> approval recorded through `POST /quality/fai/{id}/customer-approval`; an earlier FAILED or open FAI
+> superseded by a newer one for the same part no longer fires, since 2026-11-23), `open_blocker`
 > (an open/acknowledged work-order blocker), and `no_labor_recorded` (severity `medium`: a work order
 > completed with one or more operations that recorded **zero** labor — no time entry, or only
 > zero-duration entries — so its cost/hour actuals may be understated; helps surface missed clock-ins),
@@ -12778,7 +12781,12 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 > `certificates_of_conformance` row stores the immutable certified facts at issue time and the PDF is
 > rendered **deterministically on download** (there is no filesystem blob). CoC content is an AS9100D
 > conformance statement + part/revision + WO# / customer-PO + quantity + lot/serial table +
-> signature/issuer block. All three endpoints are **tenant-scoped** (a cross-tenant `shipment_id`
+> signature/issuer block. Since 2026-11-23 the PDF also carries the issuing company's letterhead (name,
+> address, phone from the `Company` record), the PO line and the unit number, and prints the issue
+> date as a company-local date. A certificate issued from then on freezes those facts into its
+> snapshot; an older one falls back to the live `Company` row for the letterhead when rendered. The
+> packing slip's "Print certificate" opens this issued PDF (the browser-drawn look-alike certificate
+> page is gone). All three endpoints are **tenant-scoped** (a cross-tenant `shipment_id`
 > returns **404**):
 > - `POST /shipping/{shipment_id}/coc` — issue or return the existing CoC. **Idempotent**: at most one
 >   CoC per shipment, DB-enforced (`uq_coc_company_shipment`); re-issuing returns the same CoC with no
@@ -12821,6 +12829,14 @@ service makes **no** external call and returns **409**. Write actions are RBAC-g
 >   acceptance row is written for the caller.
 > - The `coc_withheld` state is read from the `COC_WITHHELD` audit rows, so it depends on audit-log
 >   retention until a column replaces it (planned with certificate reissue).
+> - Response shapes. `POST /shipping/{shipment_id}/ship` returns `{message, shipment_number,
+>   coc_withheld, release_exceptions}` (the already-shipped answer is unchanged). `GET /shipping/`,
+>   `POST /shipping/` and `PUT /shipping/{shipment_id}` rows carry `coc_number`, `coc_issued_at`
+>   (UTC `Z`) and `coc_withheld`, read in batch. `GET /shipping/{shipment_id}` carries those three,
+>   `release_exceptions`, and the packing slip's order facts: `po_line_item`, `unit_number`,
+>   `part_revision`, `serial_numbers` (a list), `ship_to_city`, `ship_to_state`, `ship_to_zip`. The
+>   list rows do **not** carry `release_exceptions`; the ready-to-ship rows and the detail do.
+>   Every read is pure: no audit row, event, certificate or ledger row.
 
 ### Reports
 
@@ -16748,8 +16764,10 @@ What matters from this file's point of view:
   `PUT /companies/me/floor-pin-policy` — a badge sign-on credential is a person's act; the routes
   also refuse API tokens) and the two document-access writes (`PUT /users/{user_id}/export-authorization`,
   `POST /documents/{document_id}/access-level` — deciding who may open a controlled document is a
-  person's judgment; the routes also refuse API tokens, and the access review stays a tool) — plus 15 fixed-name convenience tools that shadow 16
-  raw routes (`POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
+  person's judgment; the routes also refuse API tokens, and the access review stays a tool) and issuing a
+  Certificate of Conformance (`POST /shipping/{shipment_id}/coc` — the route also refuses API tokens) — plus 16
+  fixed-name convenience tools that shadow 17 raw routes (`POST /shipping/{shipment_id}/ship` among them, fronted
+  by `mark_shipped`, which never sends the acknowledgment that accepts open quality items; `POST /work-orders/`, `PUT /work-orders/{id}`, `POST /work-orders/{id}/release`, the two
   nest-package imports, the manual nest add, `GET /search/`, …) to enforce agent rules the routes do
   not: create/duplicate always land DRAFT, release is a separate explicit tool and the generic update
   refuses `status: released` / `in_progress`, a nest-package import or manual nest add is set back to
