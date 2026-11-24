@@ -411,16 +411,25 @@ STORAGE_WARNING_UNKNOWN = (
 )
 
 
+#: Reported as ``endpoint_host`` when ``S3_ENDPOINT_URL`` is set but yields no hostname
+#: (no scheme, or malformed), so a custom endpoint never reads as the AWS default.
+UNPARSEABLE_ENDPOINT_HOST = "(unparseable endpoint)"
+
+
 def _endpoint_hostname(endpoint_url: Optional[str]) -> Optional[str]:
-    """Hostname only: ``urlparse().hostname`` drops scheme, userinfo, port, path and query."""
+    """Hostname only: ``urlparse().hostname`` drops scheme, userinfo, port, path and query.
+
+    ``None`` only when no endpoint is configured (the AWS default); a configured URL
+    with no parseable hostname is ``UNPARSEABLE_ENDPOINT_HOST``, never ``None``.
+    """
     if not endpoint_url:
         return None
     try:
         from urllib.parse import urlparse
 
-        return urlparse(endpoint_url).hostname or None
+        return urlparse(endpoint_url).hostname or UNPARSEABLE_ENDPOINT_HOST
     except ValueError:
-        return None
+        return UNPARSEABLE_ENDPOINT_HOST
 
 
 def _path_on_mounted_volume(path: str) -> Optional[bool]:
@@ -449,21 +458,31 @@ def _path_on_mounted_volume(path: str) -> Optional[bool]:
         return None
 
 
-def describe_storage_configuration() -> Dict[str, Any]:
+def describe_storage_configuration(*, include_location: bool = True) -> Dict[str, Any]:
     """Which document-storage backend new writes use, and where it points -- no secrets.
 
     Returns a dict shaped as ``app.schemas.storage.StorageStatus``. Reads
     ``settings.STORAGE_BACKEND`` (not ``get_storage()``) so it never instantiates the
     S3 client, and never reports credentials, a full endpoint URL or a filesystem path.
+
+    ``include_location=False`` nulls ``bucket`` / ``endpoint_host`` / ``region``: the
+    unauthenticated ``/health/detailed`` passes it, so the document store's address is
+    served only on the authenticated ``/api/v1/setup/health``.
+
+    For local storage it describes the directory writes actually use: an unset
+    ``UPLOAD_DIR`` is ``/app/uploads``, while a SET-but-empty one makes
+    ``resolve_upload_dir`` fall back to ``UPLOAD_DIR_FALLBACK``, so that is what is
+    checked. It does not repeat the fallback taken when the preferred directory cannot
+    be created (that needs ``makedirs``, and this is a pure read).
     """
     backend = (settings.STORAGE_BACKEND or "local").lower()
     if backend == "s3":
         return {
             "backend": "s3",
             "durability": "durable",
-            "bucket": settings.S3_BUCKET_NAME or None,
-            "endpoint_host": _endpoint_hostname(settings.S3_ENDPOINT_URL),
-            "region": settings.AWS_REGION or None,
+            "bucket": (settings.S3_BUCKET_NAME or None) if include_location else None,
+            "endpoint_host": _endpoint_hostname(settings.S3_ENDPOINT_URL) if include_location else None,
+            "region": (settings.AWS_REGION or None) if include_location else None,
             "upload_dir_configured": None,
             "upload_dir_exists": None,
             "upload_dir_on_mounted_volume": None,
@@ -471,7 +490,13 @@ def describe_storage_configuration() -> Dict[str, Any]:
         }
 
     configured = os.getenv("UPLOAD_DIR")
-    upload_dir = configured or DEFAULT_UPLOAD_DIR
+    if configured is None:
+        upload_dir = DEFAULT_UPLOAD_DIR
+    elif configured:
+        upload_dir = configured
+    else:
+        # Set but empty: makedirs("") fails in resolve_upload_dir, so writes go to the fallback.
+        upload_dir = os.path.abspath(os.getenv("UPLOAD_DIR_FALLBACK", "./uploads"))
     try:
         exists: Optional[bool] = os.path.isdir(upload_dir)
     except OSError:

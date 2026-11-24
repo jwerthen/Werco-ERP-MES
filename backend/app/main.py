@@ -1285,15 +1285,16 @@ async def detailed_health_check():
             "stats": cache.stats,
         }
 
-    # Document storage: which backend NEW uploads go to and where it points (bucket +
-    # endpoint hostname for s3; for local, whether the upload path sits on a mounted
-    # volume). This endpoint is unauthenticated, so the summary carries no credential,
-    # no full endpoint URL and no filesystem path. Informational: it never degrades the
+    # Document storage: which backend NEW uploads go to (for local, whether the upload
+    # path sits on a mounted volume). This endpoint is unauthenticated, so the summary
+    # carries no credential, no full endpoint URL, no filesystem path and -- unlike the
+    # authenticated /api/v1/setup/health -- no bucket, endpoint host or region, so it
+    # never publishes the document store's address. Informational: it never degrades the
     # overall status, and a failure to read it is reported rather than 500ing the probe.
     try:
         from app.services.storage_service import describe_storage_configuration
 
-        checks["storage"] = describe_storage_configuration()
+        checks["storage"] = describe_storage_configuration(include_location=False)
     except Exception as e:
         checks["storage"] = {"status": "unknown", "error": type(e).__name__}
 

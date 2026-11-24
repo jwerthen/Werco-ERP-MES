@@ -24,10 +24,12 @@ class StorageStatus(BaseModel):
     #: redeploy); ``"unknown"`` -- local disk whose mount state could not be read.
     durability: Literal["durable", "volume", "ephemeral", "unknown"]
 
-    # s3 only (None for local).
+    # s3 only (None for local), and only on the authenticated setup health: the
+    # unauthenticated /health/detailed always serves these three as None.
     bucket: Optional[str] = None
     #: Hostname of ``S3_ENDPOINT_URL`` only (no scheme, port, path, query or userinfo).
-    #: None means the AWS S3 default endpoint for ``region``.
+    #: None means the AWS S3 default endpoint for ``region``; ``"(unparseable endpoint)"``
+    #: means one is configured but has no parseable hostname.
     endpoint_host: Optional[str] = None
     region: Optional[str] = None
 

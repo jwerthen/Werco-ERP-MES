@@ -60,7 +60,7 @@ class TestDescribeStorageConfiguration:
         StorageStatus(**summary)
 
     def test_s3_never_builds_a_client(self, s3_settings, monkeypatch):
-        def _boom():
+        def _boom(**_kwargs):
             raise AssertionError("health output must not instantiate the S3 backend")
 
         monkeypatch.setattr(storage_service, "get_s3_storage", _boom)
@@ -147,7 +147,8 @@ class TestMountHeuristic:
             ("", None),
             ("https://objects.example.test", "objects.example.test"),
             (ENDPOINT_WITH_SECRETS, "objects.example.test"),
-            ("not a url", None),
+            ("not a url", "(unparseable endpoint)"),
+            ("objects.example.test", "(unparseable endpoint)"),
         ],
     )
     def test_endpoint_hostname(self, url, expected):
@@ -162,11 +163,17 @@ class TestStorageOnHealthDetailed:
         assert response.status_code == status.HTTP_200_OK
         storage = response.json()["checks"]["storage"]
         assert storage["backend"] == "s3"
-        assert storage["endpoint_host"] == "objects.example.test"
+        assert storage["durability"] == "durable"
+        # Unauthenticated: the document store's address is never published here.
+        assert storage["bucket"] is None
+        assert storage["endpoint_host"] is None
+        assert storage["region"] is None
+        assert "fictional-docs-bucket" not in response.text
+        assert "objects.example.test" not in response.text
         _assert_no_secret(response.json())
 
     def test_detailed_health_survives_a_storage_read_failure(self, client: TestClient, monkeypatch):
-        def _boom():
+        def _boom(**_kwargs):
             raise RuntimeError("broken")
 
         monkeypatch.setattr(storage_service, "describe_storage_configuration", _boom)
@@ -192,7 +199,7 @@ class TestStorageOnSetupHealth:
     def test_setup_health_storage_null_on_read_failure(self, client: TestClient, auth_headers: dict, monkeypatch):
         from app.api.endpoints import setup as setup_endpoint
 
-        def _boom():
+        def _boom(**_kwargs):
             raise RuntimeError("broken")
 
         monkeypatch.setattr(setup_endpoint, "describe_storage_configuration", _boom)
@@ -264,9 +271,25 @@ class TestMountHeuristicEdges:
         monkeypatch.setattr(os.path, "ismount", lambda p: False)
         assert _path_on_mounted_volume(str(tmp_path / "a" / "b")) is False
 
-    def test_malformed_endpoint_url_yields_no_host(self):
-        # urlparse raises ValueError on an unbalanced IPv6 bracket.
-        assert _endpoint_hostname("https://[::1") is None
+    def test_malformed_endpoint_url_yields_the_unparseable_sentinel(self):
+        # urlparse raises ValueError on an unbalanced IPv6 bracket; a configured endpoint
+        # must never read as None, which the panel renders as the AWS default.
+        assert _endpoint_hostname("https://[::1") == "(unparseable endpoint)"
+
+    def test_set_but_empty_upload_dir_describes_the_fallback(self, monkeypatch, tmp_path):
+        fallback = tmp_path / "fallback-dir"
+        fallback.mkdir()
+        monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+        monkeypatch.setenv("UPLOAD_DIR", "")
+        monkeypatch.setenv("UPLOAD_DIR_FALLBACK", str(fallback))
+        seen = []
+        real_isdir = os.path.isdir
+        monkeypatch.setattr(os.path, "isdir", lambda p: seen.append(p) or real_isdir(p))
+
+        summary = describe_storage_configuration()
+
+        assert summary["upload_dir_exists"] is True
+        assert seen == [str(fallback)]
 
 
 @pytest.mark.api
@@ -292,7 +315,7 @@ class TestHealthDetailedContract:
         baseline = client.get("/health/detailed").json()["status"]
         assert baseline == "healthy"
 
-        def _boom():
+        def _boom(**_kwargs):
             raise RuntimeError("broken")
 
         monkeypatch.setattr(storage_service, "describe_storage_configuration", _boom)
@@ -323,7 +346,7 @@ class TestHealthDetailedContract:
         assert str(tmp_path) not in response.text
 
     def test_failure_error_names_the_class_only(self, client: TestClient, monkeypatch):
-        def _boom():
+        def _boom(**_kwargs):
             raise RuntimeError(f"cannot read {SECRET_ACCESS_KEY}")
 
         monkeypatch.setattr(storage_service, "describe_storage_configuration", _boom)
@@ -339,10 +362,18 @@ class TestSetupHealthStorageContract:
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
         assert "fictional-docs-bucket" not in response.text
 
-    def test_matches_the_health_detailed_summary(self, client: TestClient, auth_headers: dict, s3_settings):
+    def test_matches_the_health_detailed_summary_except_the_location(
+        self, client: TestClient, auth_headers: dict, s3_settings
+    ):
         detailed = client.get("/health/detailed").json()["checks"]["storage"]
         setup = client.get("/api/v1/setup/health", headers=auth_headers).json()["storage"]
-        assert setup == detailed
+        assert setup["bucket"] == "fictional-docs-bucket"
+        assert setup["endpoint_host"] == "objects.example.test"
+        assert setup["region"] == "us-east-2"
+        location = ("bucket", "endpoint_host", "region")
+        assert {k: v for k, v in setup.items() if k not in location} == {
+            k: v for k, v in detailed.items() if k not in location
+        }
 
     def test_local_path_not_exposed_on_setup_health(
         self, client: TestClient, auth_headers: dict, monkeypatch, tmp_path
