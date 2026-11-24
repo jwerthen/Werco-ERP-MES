@@ -204,6 +204,56 @@ describe('routed rows keep their process sheet', () => {
     expect(postedOperations().map(op => op.routing_operation_id)).toEqual([30, 31]);
   });
 
+  it('sends no routing id from a DRAFT routing, so an edited row is not refused at create', async () => {
+    // /routing/by-part returns the active routing in any status; the server links only to a
+    // released routing, so a draft routing's ids would all be refused 409 at create.
+    mockedApi.getRoutingByPart.mockResolvedValue({ ...ROUTING, status: 'draft' });
+    mockedApi.previewWorkOrderOperations.mockResolvedValue({ bom_found: false, operations_preview: [] });
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.change(screen.getAllByLabelText('Operation name')[1], { target: { value: 'Weld (revised)' } });
+    expect(screen.queryByTestId('wo-stale-routing-links')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wo-missing-sheet-steps')).not.toBeInTheDocument();
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([undefined, undefined]);
+  });
+
+  it('sends no routing id from a draft routing when the preview read fails either', async () => {
+    mockedApi.getRoutingByPart.mockResolvedValue({ ...ROUTING, status: 'draft' });
+    mockedApi.previewWorkOrderOperations.mockRejectedValue(new Error('Offline'));
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.change(screen.getAllByLabelText('Operation name')[0], { target: { value: 'Cut (revised)' } });
+    expect(screen.queryByTestId('wo-missing-sheet-steps')).not.toBeInTheDocument();
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([undefined, undefined]);
+  });
+
+  it('leaves off inactive and work-center-less routing operations, and never lists them as removed', async () => {
+    mockedApi.getRoutingByPart.mockResolvedValue({
+      ...ROUTING,
+      operations: [
+        ...ROUTING.operations,
+        { ...ROUTING.operations[1], id: 32, sequence: 30, operation_number: '30', name: 'Retired', is_active: false },
+        { ...ROUTING.operations[1], id: 33, sequence: 40, operation_number: '40', name: 'Orphan', work_center: null },
+      ],
+    });
+    mockedApi.previewWorkOrderOperations.mockRejectedValue(new Error('Offline'));
+    await renderPage();
+    await selectPart('PN-4410', 1);
+    await waitFor(() => expect(screen.getAllByLabelText('Operation name')).toHaveLength(2));
+    fireEvent.change(screen.getAllByLabelText('Operation name')[0], { target: { value: 'Cut (revised)' } });
+    expect(screen.queryByTestId('wo-stale-routing-links')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wo-missing-sheet-steps')).not.toBeInTheDocument();
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(mockedApi.createWorkOrder).toHaveBeenCalled());
+    expect(postedOperations().map(op => op.routing_operation_id)).toEqual([30, 31]);
+  });
+
   it('warns, naming the step and sheet, when a sheet-bearing step is removed, and still creates', async () => {
     await renderPage();
     await selectPart('PN-4410', 1);

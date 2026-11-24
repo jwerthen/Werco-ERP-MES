@@ -35,11 +35,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import exists
+from sqlalchemy import exists, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.tenant_filter import tenant_query
-from app.models.bom import BOM
+from app.models.bom import BOM, BOMItem
 from app.models.part import Part, PartType
 from app.models.process_sheet import ProcessSheet, WOOperationStep
 from app.models.routing import Routing, RoutingOperation
@@ -85,7 +85,15 @@ class RoutedStep:
         return int(self.routing_operation.id)
 
 
-def _released_routings_by_part(db: Session, company_id: int, part_ids: Iterable[int]) -> Dict[int, Routing]:
+def released_routings_by_part(db: Session, company_id: int, part_ids: Iterable[int]) -> Dict[int, Routing]:
+    """THE "which released routing does this part copy" rule, one per part.
+
+    Shared by the routed create path (``create_routing_operations_for_work_order`` and
+    ``_create_assembly_routing_operations``), the preview and the supplied-row link
+    validation, so the steps a planner is shown, the links the server accepts and the rows
+    the routed create copies always come from the same routing. Active, released and not
+    soft-deleted; on a duplicate release the lowest id wins, deterministically.
+    """
     ids = {int(pid) for pid in part_ids if pid}
     if not ids:
         return {}
@@ -134,7 +142,7 @@ def released_routing_steps(
     if is_assembly:
         sequence = 10
         component_items = _collect_bom_components(db, bom, company_id) if bom else []
-        routings = _released_routings_by_part(
+        routings = released_routings_by_part(
             db, company_id, [component.id for _, component, _ in component_items] + [part.id]
         )
         quantity_by_component: Dict[int, float] = {}
@@ -174,7 +182,7 @@ def released_routing_steps(
                 rows.append((rop, None, float(quantity or 0), sequence, str(sequence), rop.name))
                 sequence += 10
     else:
-        own = _released_routings_by_part(db, company_id, [part.id]).get(int(part.id))
+        own = released_routings_by_part(db, company_id, [part.id]).get(int(part.id))
         if own is not None:
             for rop in sorted(own.operations, key=lambda op: op.sequence):
                 if not rop.is_active:
@@ -362,22 +370,46 @@ def _parts_with_sheet_bearing_routing(db: Session, company_id: int) -> set:
     return {int(part_id) for (part_id,) in rows}
 
 
-def _parts_with_active_bom(db: Session, company_id: int, part_ids: Iterable[int]) -> set:
-    ids = {int(pid) for pid in part_ids}
-    if not ids:
-        return set()
-    rows = (
-        tenant_query(db, BOM, company_id)
-        .filter(
-            BOM.part_id.in_(ids),
-            BOM.is_active == True,  # noqa: E712
-            BOM.is_deleted == False,  # noqa: E712
+def _parts_reaching(db: Session, company_id: int, direct: set) -> set:
+    """Every part that is in ``direct`` or whose active BOM tree contains one that is.
+
+    One batched BOM-item read per BOM level, walked upwards from ``direct``. A pre-filter
+    only: it may include a part the routing walk then finds carries nothing (it ignores the
+    walk's stop at buy items), but it never leaves out one that does.
+    """
+    reached = set(direct)
+    frontier = set(direct)
+    while frontier:
+        rows = (
+            tenant_query(db, BOMItem, company_id)
+            .join(BOM, BOM.id == BOMItem.bom_id)
+            .filter(
+                BOM.company_id == company_id,
+                BOM.is_active == True,  # noqa: E712
+                BOM.is_deleted == False,  # noqa: E712
+                BOMItem.component_part_id.in_(frontier),
+            )
+            .with_entities(BOM.part_id)
+            .distinct()
+            .all()
         )
-        .with_entities(BOM.part_id)
-        .distinct()
+        frontier = {int(part_id) for (part_id,) in rows} - reached
+        reached |= frontier
+    return reached
+
+
+def _operation_counts(db: Session, company_id: int, work_order_ids: Iterable[int]) -> Dict[int, int]:
+    ids = {int(wo_id) for wo_id in work_order_ids}
+    if not ids:
+        return {}
+    rows = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.work_order_id.in_(ids))
+        .with_entities(WorkOrderOperation.work_order_id, func.count(WorkOrderOperation.id))
+        .group_by(WorkOrderOperation.work_order_id)
         .all()
     )
-    return {int(part_id) for (part_id,) in rows}
+    return {int(wo_id): int(count) for wo_id, count in rows}
 
 
 def process_sheet_gaps(db: Session, company_id: int) -> List[Dict[str, Any]]:
@@ -399,7 +431,7 @@ def process_sheet_gaps(db: Session, company_id: int) -> List[Dict[str, Any]]:
     )
     candidates: List[WorkOrder] = (
         tenant_query(db, WorkOrder, company_id)
-        .options(selectinload(WorkOrder.part), selectinload(WorkOrder.operations))
+        .options(selectinload(WorkOrder.part))
         .filter(
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status.notin_(TERMINAL_WORK_ORDER_STATUSES),
@@ -414,13 +446,15 @@ def process_sheet_gaps(db: Session, company_id: int) -> List[Dict[str, Any]]:
         return []
 
     # Cheap pre-filter before the per-part routing walk: a part can only carry a sheet
-    # through its own released routing or, when it has an active BOM, a component's.
+    # through its own released routing or a BOM component's (at any depth), so only parts
+    # whose own routing or BOM tree reaches a sheet-bearing routing are walked.
     direct = _parts_with_sheet_bearing_routing(db, company_id)
     if not direct:
         return []
     candidate_part_ids = {int(wo.part_id) for wo in candidates}
-    with_bom = _parts_with_active_bom(db, company_id, candidate_part_ids)
-    worth_walking = {pid for pid in candidate_part_ids if pid in direct or pid in with_bom}
+    worth_walking = candidate_part_ids & _parts_reaching(db, company_id, direct)
+    if not worth_walking:
+        return []
 
     steps_by_part: Dict[int, List[RoutedStep]] = {}
     items: List[Dict[str, Any]] = []
@@ -449,8 +483,11 @@ def process_sheet_gaps(db: Session, company_id: int) -> List[Dict[str, Any]]:
                 "due_date": wo.due_date,
                 "customer_name": wo.customer_name,
                 "created_at": wo.created_at,
-                "operation_count": len([op for op in wo.operations if op.company_id == company_id]),
+                "operation_count": 0,  # filled from one grouped count below
                 "expected_process_sheet_steps": [_removed_step_entry(step) for step in sheet_steps],
             }
         )
+    counts = _operation_counts(db, company_id, [item["work_order_id"] for item in items])
+    for item in items:
+        item["operation_count"] = counts.get(int(item["work_order_id"]), 0)
     return items

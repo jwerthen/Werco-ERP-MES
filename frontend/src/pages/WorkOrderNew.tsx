@@ -100,6 +100,8 @@ interface RoutingOperation {
   setup_instructions?: string;
   is_inspection_point?: boolean;
   process_sheet_id?: number | null;
+  // Absent on an older API; only an explicit false marks an operation the routed create skips.
+  is_active?: boolean;
 }
 
 interface Routing {
@@ -730,21 +732,37 @@ export default function WorkOrderNew() {
         });
         if (routingRes && routingRes.operations?.length > 0) {
           setRouting(routingRes);
-          setRoutedSteps(
-            previewById.size > 0
-              ? routedStepsFromPreview(previewRes)
-              : (routingRes.operations as RoutingOperation[]).map(op => ({
-                  routing_operation_id: op.id,
-                  operation_number: op.operation_number || String(op.sequence),
-                  sequence: op.sequence,
-                  name: op.name,
-                  component_part_id: null,
-                  process_sheet_id: op.process_sheet_id ?? null,
-                  process_sheet_number: null,
-                }))
+          // A row links to its routing operation only when the server would accept the link:
+          // the server validates against the part's RELEASED routing's ACTIVE operations (the
+          // same set the preview reads). /routing/by-part returns the active routing in any
+          // status, so a draft routing's ids would all be refused 409 at create. When the
+          // preview answered, it is the authority; only when it failed do we fall back to
+          // "released routing, active operation".
+          const routingReleased = routingRes.status === 'released';
+          const linkableId = (op: RoutingOperation): number | undefined => {
+            if (previewRes) return previewById.has(op.id) ? op.id : undefined;
+            return routingReleased && op.is_active !== false ? op.id : undefined;
+          };
+          // The same operations the routed create copies: active, with a work center.
+          const rowOperations = (routingRes.operations as RoutingOperation[]).filter(
+            op => op.work_center && op.is_active !== false
           );
-          const ops: OperationPreview[] = routingRes.operations
-            .filter((op: RoutingOperation) => op.work_center)
+          setRoutedSteps(
+            previewRes
+              ? routedStepsFromPreview(previewRes)
+              : routingReleased
+                ? rowOperations.map(op => ({
+                    routing_operation_id: op.id,
+                    operation_number: op.operation_number || String(op.sequence),
+                    sequence: op.sequence,
+                    name: op.name,
+                    component_part_id: null,
+                    process_sheet_id: op.process_sheet_id ?? null,
+                    process_sheet_number: null,
+                  }))
+                : []
+          );
+          const ops: OperationPreview[] = rowOperations
             .map((op: RoutingOperation) => ({
               sequence: op.sequence,
               // The routing's own value is copied VERBATIM -- a routing
@@ -762,7 +780,7 @@ export default function WorkOrderNew() {
               run_instructions: op.work_instructions || '',
               requires_inspection: Boolean(op.is_inspection_point),
               fromRouting: true,
-              routing_operation_id: op.id,
+              routing_operation_id: linkableId(op),
               process_sheet_id: previewById.get(op.id)?.process_sheet_id ?? op.process_sheet_id ?? null,
               process_sheet_number: previewById.get(op.id)?.process_sheet_number ?? null,
               process_sheet_released: previewById.get(op.id)?.process_sheet_released ?? null,

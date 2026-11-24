@@ -855,3 +855,107 @@ class TestProcessSheetGapListCredentials:
         tool = by_route[("GET", GAPS_URL)]
         assert tool.name == "list_process_sheet_gaps"
         assert tool.query_params == ("limit",)
+
+
+# --------------------------------------------------------------------------- review-fix additions
+
+
+class TestRemovedSheetStepAuditIsRequired:
+    def test_a_failed_audit_write_for_a_removed_sheet_step_creates_nothing(
+        self, client: TestClient, auth_headers: dict, db_session: Session, monkeypatch
+    ):
+        """The creation row is the only record of a dropped sheet step, so it is REQUIRED."""
+        from app.services.audit_service import AuditService
+
+        part, _sheet_row, _op10, op20 = _two_step_part(db_session)
+        before = _wo_count(db_session)
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op20)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, response.text
+        assert _wo_count(db_session) == before
+
+    def test_a_supplied_create_keeping_every_sheet_stays_best_effort(
+        self, client: TestClient, auth_headers: dict, db_session: Session, monkeypatch
+    ):
+        from app.services.audit_service import AuditService
+
+        part, _sheet_row, op10, op20 = _two_step_part(db_session)
+        before = _wo_count(db_session)
+        monkeypatch.setattr(AuditService, "log", lambda self, *args, **kwargs: None)
+        response = client.post(
+            CREATE_URL,
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": [_row(op10), _row(op20)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        assert _wo_count(db_session) == before + 1
+
+    def test_no_routing_and_no_operations_is_not_a_supplied_create(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _sheet_row, _op10, _op20 = _two_step_part(db_session)
+        response = client.post(
+            CREATE_URL + "?auto_routing=false",
+            json={"part_id": part.id, "quantity_ordered": 1, "operations": []},
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        extra = _creation_extra(db_session, response.json()["id"])
+        assert "operations_supplied" not in extra and "removed_process_sheet_steps" not in extra
+
+
+class TestOneRoutingSelectionRule:
+    def test_a_soft_deleted_released_routing_is_neither_previewed_nor_copied(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        part, _sheet_row, op10, _op20 = _two_step_part(db_session)
+        db_session.query(Routing).filter(Routing.id == op10.routing_id).update({"is_deleted": True})
+        db_session.commit()
+        preview = client.get(PREVIEW_URL.format(part_id=part.id), headers=auth_headers)
+        assert preview.status_code == status.HTTP_200_OK, preview.text
+        assert preview.json()["operations_preview"] == []
+        response = client.post(CREATE_URL, json={"part_id": part.id, "quantity_ordered": 1}, headers=auth_headers)
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        assert _steps_for(db_session, response.json()["id"]) == {}
+
+
+class TestGapListBomWalk:
+    def test_a_two_level_assembly_whose_grandchild_carries_the_sheet_is_listed(
+        self, client: TestClient, auth_headers: dict, db_session: Session
+    ):
+        sub, component, sheet, comp_op = _assembly_with_sheeted_component(db_session)
+        top = Part(
+            part_number=f"TOP-{_n():04d}",
+            name="Frame",
+            part_type="assembly",
+            unit_of_measure="each",
+            is_active=True,
+            company_id=1,
+        )
+        db_session.add(top)
+        db_session.flush()
+        bom = BOM(part_id=top.id, revision="A", status="released", is_active=True, company_id=1)
+        db_session.add(bom)
+        db_session.flush()
+        db_session.add(
+            BOMItem(bom_id=bom.id, component_part_id=sub.id, item_number=10, quantity=1, item_type="make", company_id=1)
+        )
+        db_session.commit()
+        response = client.post(
+            CREATE_URL,
+            json={
+                "part_id": top.id,
+                "quantity_ordered": 1,
+                "operations": [_row(comp_op, link=False, component_part_id=component.id)],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == status.HTTP_201_CREATED, response.text
+        items = {item["work_order_id"]: item for item in _gaps(client, auth_headers)["items"]}
+        row = items[response.json()["id"]]
+        assert [s["sheet_number"] for s in row["expected_process_sheet_steps"]] == [sheet.sheet_number]
+        assert row["operation_count"] == 1

@@ -2646,6 +2646,12 @@ def _is_inspection_operation(operation: RoutingOperation) -> bool:
     return any(token in field for field in wc_fields for token in inspection_tokens)
 
 
+MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE = (
+    "The audit record of the process-sheet steps left off this work order could not be saved; "
+    "the work order was not created. Retry."
+)
+
+
 @router.post("/", response_model=WorkOrderResponse, status_code=status.HTTP_201_CREATED)
 def create_work_order(
     work_order_in: WorkOrderCreate,
@@ -2708,12 +2714,15 @@ def create_work_order(
         # sequence or name) keeps that step's process sheet -- the SAME snapshot the routed
         # path runs, so a family with no released revision is the same 409 and rolls the
         # whole creation back. A stale or foreign link is refused 409 before the snapshot.
-        supplied_link = work_order_process_sheet_service.link_supplied_operations(
-            db, part, company_id, float(work_order_in.quantity_ordered), supplied_rows
-        )
-        process_sheet_snapshot = process_sheet_service.snapshot_steps_for_work_order(
-            db, company_id, supplied_link.operation_sheet_pairs
-        )
+        # Only when rows were actually supplied: ``auto_routing=false`` with no operations
+        # is an empty job by request, not a planner who removed every routed step.
+        if supplied_rows:
+            supplied_link = work_order_process_sheet_service.link_supplied_operations(
+                db, part, company_id, float(work_order_in.quantity_ordered), supplied_rows
+            )
+            process_sheet_snapshot = process_sheet_service.snapshot_steps_for_work_order(
+                db, company_id, supplied_link.operation_sheet_pairs
+            )
 
     work_order_id = work_order.id
 
@@ -2760,13 +2769,28 @@ def create_work_order(
         creation_extra["operations_supplied"] = True
         creation_extra["linked_routing_operation_ids"] = supplied_link.linked_routing_operation_ids
         creation_extra["removed_process_sheet_steps"] = supplied_link.removed_process_sheet_steps
-    audit.log_create(
-        resource_type="work_order",
-        resource_id=work_order.id,
-        resource_identifier=work_order.work_order_number,
-        new_values=work_order,
-        extra_data=creation_extra,
-    )
+    if supplied_link is not None and supplied_link.removed_process_sheet_steps:
+        # This row is the ONLY record that the job was created without some of its routing's
+        # required checks (the Sheet Gaps list shows only jobs that hold none at all), so it
+        # is REQUIRED evidence: the work order and the row commit together, or neither does.
+        with required_audit(db, MSG_REMOVED_SHEET_STEPS_AUDIT_UNAVAILABLE):
+            audit.log_required(
+                action=audit.ACTIONS["CREATE"],
+                resource_type="work_order",
+                resource_id=work_order.id,
+                resource_identifier=work_order.work_order_number,
+                description=f"Created work_order: {work_order.work_order_number}",
+                new_values=audit._model_to_dict(work_order),
+                extra_data=creation_extra,
+            )
+    else:
+        audit.log_create(
+            resource_type="work_order",
+            resource_id=work_order.id,
+            resource_identifier=work_order.work_order_number,
+            new_values=work_order,
+            extra_data=creation_extra,
+        )
     db.commit()
 
     # Defensive reconcile, in its OWN transaction after the work order and its audit row are
@@ -2964,18 +2988,11 @@ def _create_assembly_routing_operations(
 
         routings_by_part_id = {}
         if component_ids:
-            routings = (
-                db.query(Routing)
-                .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-                .filter(
-                    Routing.company_id == company_id,
-                    Routing.part_id.in_(set(component_ids)),
-                    Routing.is_active == True,
-                    Routing.status == "released",
-                )
-                .all()
+            # ONE routing-selection rule, shared with the preview and the supplied-row link
+            # validation (wo_change/2), so what is shown, validated and copied cannot differ.
+            routings_by_part_id = work_order_process_sheet_service.released_routings_by_part(
+                db, company_id, component_ids
             )
-            routings_by_part_id = {routing.part_id: routing for routing in routings}
 
         quantity_by_component_id: dict[int, float] = {}
         for _, component_for_qty, qty_per_assembly in component_items:
@@ -3032,17 +3049,9 @@ def _create_assembly_routing_operations(
                 operation_sheet_pairs.append((wo_op, rop.process_sheet_id))
                 sequence += 10
 
-    assembly_routing = (
-        db.query(Routing)
-        .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-        .filter(
-            Routing.company_id == company_id,
-            Routing.part_id == work_order.part_id,
-            Routing.is_active == True,
-            Routing.status == "released",
-        )
-        .first()
-    )
+    assembly_routing = work_order_process_sheet_service.released_routings_by_part(
+        db, company_id, [work_order.part_id]
+    ).get(int(work_order.part_id))
 
     if not assembly_routing:
         return operation_sheet_pairs
@@ -3109,16 +3118,8 @@ def create_routing_operations_for_work_order(
         )
         return process_sheet_service.snapshot_steps_for_work_order(db, company_id, operation_sheet_pairs)
 
-    routing = (
-        db.query(Routing)
-        .options(selectinload(Routing.operations).selectinload(RoutingOperation.work_center))
-        .filter(
-            Routing.company_id == company_id,
-            Routing.part_id == work_order.part_id,
-            Routing.is_active == True,
-            Routing.status == "released",
-        )
-        .first()
+    routing = work_order_process_sheet_service.released_routings_by_part(db, company_id, [work_order.part_id]).get(
+        int(work_order.part_id)
     )
     if not routing:
         return []
