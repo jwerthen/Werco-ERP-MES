@@ -260,3 +260,149 @@ export interface ShipmentTracking {
   actual_delivery?: string | null;
   events: TrackingEvent[];
 }
+
+// ---------------------------------------------------------------------------
+// Shipments, the issued Certificate of Conformance, and open quality items.
+// Mirrors ``backend/app/api/endpoints/shipping.py`` (list / detail / ready-to-ship
+// / ship / coc) and ``quality_gate_service.QualityException.as_dict``.
+// ---------------------------------------------------------------------------
+
+export type ReleaseExceptionCode = 'open_ncr' | 'fai_not_passed' | 'open_blocker';
+export type ReleaseExceptionReferenceType = 'ncr' | 'fai' | 'work_order_blocker';
+
+/** One open quality item on the job behind a shipment (read only). */
+export interface ReleaseException {
+  code: ReleaseExceptionCode;
+  severity: string;
+  message: string;
+  reference_type: ReleaseExceptionReferenceType;
+  reference_id: number | null;
+}
+
+/** A row of ``GET /shipping/`` (``ShipmentResponse``). */
+export interface ShipmentSummary {
+  id: number;
+  shipment_number: string;
+  work_order_id: number;
+  work_order_number?: string | null;
+  customer_name?: string | null;
+  part_number?: string | null;
+  status: string;
+  ship_to_name?: string | null;
+  carrier?: string | null;
+  tracking_number?: string | null;
+  tracking_status?: string | null;
+  quantity_shipped: number;
+  ship_date?: string | null;
+  created_at: string;
+  /** The issued, numbered certificate (null until one is issued). */
+  coc_number?: string | null;
+  coc_issued_at?: string | null;
+  /** The automatic certificate was withheld on ship over open quality items. */
+  coc_withheld?: boolean;
+}
+
+/** ``GET /shipping/{id}``: the shipment with the order facts the packing slip prints. */
+export interface ShipmentDetail {
+  id: number;
+  shipment_number: string;
+  work_order_id: number;
+  work_order_number: string | null;
+  customer_name: string | null;
+  customer_po: string | null;
+  part_number: string | null;
+  part_name: string | null;
+  lot_number: string | null;
+  status: string;
+  ship_to_name: string | null;
+  ship_to_address: string | null;
+  ship_to_city: string | null;
+  ship_to_state: string | null;
+  ship_to_zip: string | null;
+  po_line_item: string | null;
+  unit_number: string | null;
+  part_revision: string | null;
+  serial_numbers: string[];
+  carrier: string | null;
+  tracking_number: string | null;
+  quantity_shipped: number;
+  weight_lbs: number | null;
+  num_packages: number | null;
+  ship_date: string | null;
+  cert_of_conformance: boolean | null;
+  packing_notes: string | null;
+  created_at: string | null;
+  coc_number: string | null;
+  coc_issued_at: string | null;
+  coc_withheld: boolean;
+  release_exceptions: ReleaseException[];
+}
+
+/** A row of ``GET /shipping/ready-to-ship``. */
+export interface ReadyToShipRow {
+  work_order_id: number;
+  work_order_number: string;
+  part_number?: string | null;
+  part_name?: string | null;
+  customer_name?: string | null;
+  quantity_complete: number;
+  quantity_remaining: number;
+  quantity_reserved: number;
+  quantity_shipped: number;
+  due_date?: string | null;
+  release_exceptions?: ReleaseException[];
+}
+
+/**
+ * Accepting the open quality items, sent with Ship or Issue CoC. Only Admin, Manager
+ * or Quality may send ``acknowledge_exceptions: true``, and then a reason of at least
+ * three characters is required.
+ */
+export interface ReleaseExceptionAcknowledgment {
+  acknowledge_exceptions: boolean;
+  reason?: string | null;
+}
+
+/** The structured 409 ``detail`` Ship and Issue CoC answer while items are open. */
+export interface ReleaseExceptionsConflict {
+  code: 'release_exceptions_open';
+  message: string;
+  release_exceptions: ReleaseException[];
+}
+
+/** ``POST /shipping/{id}/ship`` 200 body. */
+export interface MarkShippedResult {
+  message: string;
+  shipment_number: string;
+  coc_withheld?: boolean;
+  release_exceptions?: ReleaseException[];
+}
+
+/** ``CertificateOfConformanceResponse`` (the PDF is a separate route). */
+export interface CertificateOfConformance {
+  id: number;
+  coc_number: string;
+  shipment_id: number;
+  work_order_id: number;
+  customer_name?: string | null;
+  customer_po?: string | null;
+  part_number?: string | null;
+  part_name?: string | null;
+  revision?: string | null;
+  quantity?: number | null;
+  lot_number?: string | null;
+  issued_by?: number | null;
+  issued_at?: string | null;
+}
+
+/** Narrow an unknown Axios error ``detail`` to the open-quality-items 409. */
+export function releaseExceptionsConflict(detail: unknown): ReleaseExceptionsConflict | null {
+  if (!detail || typeof detail !== 'object') return null;
+  const candidate = detail as Partial<ReleaseExceptionsConflict>;
+  if (candidate.code !== 'release_exceptions_open' || !Array.isArray(candidate.release_exceptions)) return null;
+  return {
+    code: 'release_exceptions_open',
+    message: typeof candidate.message === 'string' ? candidate.message : '',
+    release_exceptions: candidate.release_exceptions,
+  };
+}

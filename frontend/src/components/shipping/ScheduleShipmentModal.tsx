@@ -52,11 +52,11 @@ import type {
 
 export interface ScheduleShipmentTarget {
   shipment_id: number;
-  shipment_number?: string;
-  work_order_number?: string;
-  ship_to_name?: string;
-  customer_name?: string;
-  part_number?: string;
+  shipment_number?: string | null;
+  work_order_number?: string | null;
+  ship_to_name?: string | null;
+  customer_name?: string | null;
+  part_number?: string | null;
 }
 
 type Step = 'packages' | 'address' | 'rates' | 'buy';
@@ -154,7 +154,7 @@ export default function ScheduleShipmentModal({
   const [palletCount, setPalletCount] = useState('1');
 
   const [address, setAddress] = useState<ShippingAddress>(
-    emptyAddress(target.ship_to_name || target.customer_name),
+    emptyAddress(target.ship_to_name || target.customer_name || undefined),
   );
   const [validation, setValidation] = useState<AddressValidationResult | null>(null);
   const [useNormalized, setUseNormalized] = useState(true);

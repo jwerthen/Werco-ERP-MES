@@ -226,6 +226,12 @@ import {
   CarrierConnectionTestResult,
   CompanyShippingProfile,
   CompanyShippingProfileUpdate,
+  CertificateOfConformance,
+  MarkShippedResult,
+  ReadyToShipRow,
+  ReleaseExceptionAcknowledgment,
+  ShipmentDetail,
+  ShipmentSummary,
   RateQuote,
   RateShopRequest,
   SchedulePickupRequest,
@@ -4053,22 +4059,22 @@ class ApiService {
   }
 
   // Shipping
-  async getShipments(params?: { status?: string }) {
-    const rows: any[] = [];
+  async getShipments(params?: { status?: string }): Promise<ShipmentSummary[]> {
+    const rows: ShipmentSummary[] = [];
     for (let skip = 0; ; skip += 500) {
-      const response = await this.api.get('/shipping/', { params: { ...params, skip, limit: 500 } });
+      const response = await this.api.get<ShipmentSummary[]>('/shipping/', { params: { ...params, skip, limit: 500 } });
       rows.push(...response.data);
       if (response.data.length < 500) return rows;
     }
   }
 
-  async getShipment(shipmentId: number) {
-    const response = await this.api.get(`/shipping/${shipmentId}`);
+  async getShipment(shipmentId: number): Promise<ShipmentDetail> {
+    const response = await this.api.get<ShipmentDetail>(`/shipping/${shipmentId}`);
     return response.data;
   }
 
-  async getReadyToShip() {
-    const response = await this.api.get('/shipping/ready-to-ship');
+  async getReadyToShip(): Promise<ReadyToShipRow[]> {
+    const response = await this.api.get<ReadyToShipRow[]>('/shipping/ready-to-ship');
     return response.data;
   }
 
@@ -4081,11 +4087,52 @@ class ApiService {
     return (await this.api.put(`/shipping/${shipmentId}`, data)).data;
   }
 
-  async markShipped(shipmentId: number, trackingNumber?: string) {
-    const response = await this.api.post(`/shipping/${shipmentId}/ship`, null, {
+  /**
+   * Mark a shipment shipped. Send no acknowledgment first: while the job has open
+   * quality items the server answers 409 with a structured ``detail``
+   * (``releaseExceptionsConflict``); Admin, Manager or Quality then resends with
+   * ``acknowledge_exceptions`` and a reason.
+   */
+  async markShipped(
+    shipmentId: number,
+    trackingNumber?: string,
+    acknowledgment?: ReleaseExceptionAcknowledgment
+  ): Promise<MarkShippedResult> {
+    const response = await this.api.post<MarkShippedResult>(`/shipping/${shipmentId}/ship`, acknowledgment ?? null, {
       params: { tracking_number: trackingNumber }
     });
     return response.data;
+  }
+
+  /**
+   * Issue (or return the existing) numbered Certificate of Conformance for a shipped
+   * shipment. Admin, Manager or Quality. Same open-quality-items 409 and
+   * acknowledgment as ``markShipped``; a plain-string 409 before the shipment ships.
+   */
+  async issueCoc(
+    shipmentId: number,
+    acknowledgment?: ReleaseExceptionAcknowledgment
+  ): Promise<CertificateOfConformance> {
+    const response = await this.api.post<CertificateOfConformance>(
+      `/shipping/${shipmentId}/coc`,
+      acknowledgment ?? null
+    );
+    return response.data;
+  }
+
+  /** The issued certificate's metadata (404 when none has been issued). */
+  async getCoc(shipmentId: number): Promise<CertificateOfConformance> {
+    const response = await this.api.get<CertificateOfConformance>(`/shipping/${shipmentId}/coc`);
+    return response.data;
+  }
+
+  /**
+   * The issued certificate PDF as an object URL (the route needs the JWT, so a bare
+   * ``src`` would not authenticate). The caller revokes the URL.
+   */
+  async fetchCocPdf(shipmentId: number): Promise<string> {
+    const response = await this.api.get(`/shipping/${shipmentId}/coc/pdf`, { responseType: 'blob' });
+    return window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
   }
 
   // Multi-carrier shipping (rate-shop / labels / freight / pickups / tracking).

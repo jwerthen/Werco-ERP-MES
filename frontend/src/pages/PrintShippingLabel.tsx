@@ -20,13 +20,13 @@ import { formatCentralDate, getCentralTodayISODate } from '../utils/centralTime'
 interface ShipmentHeader {
   id: number;
   shipment_number: string;
-  work_order_number?: string;
-  customer_name?: string;
-  ship_to_name?: string;
-  ship_to_address?: string;
-  carrier?: string;
-  tracking_number?: string;
-  ship_date?: string;
+  work_order_number?: string | null;
+  customer_name?: string | null;
+  ship_to_name?: string | null;
+  ship_to_address?: string | null;
+  carrier?: string | null;
+  tracking_number?: string | null;
+  ship_date?: string | null;
 }
 
 export default function PrintShippingLabel() {

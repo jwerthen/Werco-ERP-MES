@@ -70,7 +70,14 @@ describe('shipping carrier methods', () => {
 
   it('rateShop POSTs the parcels/pallets payload to /shipping/{id}/rate-shop and returns the quote list', async () => {
     const quotes = [
-      { provider_rate_id: 'r1', carrier: 'FedEx', mode: 'parcel', amount: '12.50', currency: 'USD', is_selected: false },
+      {
+        provider_rate_id: 'r1',
+        carrier: 'FedEx',
+        mode: 'parcel',
+        amount: '12.50',
+        currency: 'USD',
+        is_selected: false,
+      },
     ];
     mockPost.mockResolvedValueOnce(ok(quotes));
     const body = { parcels: [{ length_in: 6, width_in: 6, height_in: 6, weight_lbs: 2 }] };
@@ -146,7 +153,9 @@ describe('admin carrier-account + shipping-profile methods', () => {
   });
 
   it('updateCarrierAccount PUTs to /admin/settings/carrier-accounts/{id}', async () => {
-    mockPut.mockResolvedValueOnce(ok({ id: 1, name: 'Renamed', provider: 'easypost', carrier_refs: [], has_webhook_secret: false }));
+    mockPut.mockResolvedValueOnce(
+      ok({ id: 1, name: 'Renamed', provider: 'easypost', carrier_refs: [], has_webhook_secret: false })
+    );
     await api.updateCarrierAccount(1, { name: 'Renamed' });
     expect(mockPut).toHaveBeenCalledWith('/admin/settings/carrier-accounts/1', { name: 'Renamed' });
   });
@@ -179,5 +188,49 @@ describe('admin carrier-account + shipping-profile methods', () => {
       ship_from_city: 'Tulsa',
     });
     expect(result.allow_carrier_egress).toBe(true);
+  });
+});
+
+describe('ship and the numbered Certificate of Conformance', () => {
+  it('markShipped sends no body first, and the acknowledgment as the JSON body when given', async () => {
+    mockPost.mockResolvedValue(ok({ message: 'ok', shipment_number: 'SHP-1', coc_withheld: false }));
+
+    await api.markShipped(5);
+    expect(mockPost).toHaveBeenLastCalledWith('/shipping/5/ship', null, { params: { tracking_number: undefined } });
+
+    const ack = { acknowledge_exceptions: true, reason: 'Customer deviation on file' };
+    await api.markShipped(5, '1Z999', ack);
+    expect(mockPost).toHaveBeenLastCalledWith('/shipping/5/ship', ack, { params: { tracking_number: '1Z999' } });
+  });
+
+  it('issueCoc POSTs /shipping/{id}/coc with no body, or the acknowledgment', async () => {
+    mockPost.mockResolvedValue(ok({ id: 1, coc_number: 'COC-1', shipment_id: 5, work_order_id: 2 }));
+
+    const result = await api.issueCoc(5);
+    expect(mockPost).toHaveBeenLastCalledWith('/shipping/5/coc', null);
+    expect(result.coc_number).toBe('COC-1');
+
+    await api.issueCoc(5, { acknowledge_exceptions: true, reason: 'Accepted by Quality' });
+    expect(mockPost).toHaveBeenLastCalledWith('/shipping/5/coc', {
+      acknowledge_exceptions: true,
+      reason: 'Accepted by Quality',
+    });
+  });
+
+  it('getCoc GETs the certificate metadata; fetchCocPdf GETs the PDF as a blob object URL', async () => {
+    mockGet.mockResolvedValueOnce(ok({ id: 1, coc_number: 'COC-1', shipment_id: 5, work_order_id: 2 }));
+    expect((await api.getCoc(5)).coc_number).toBe('COC-1');
+    expect(mockGet).toHaveBeenLastCalledWith('/shipping/5/coc');
+
+    const createSpy = jest.fn(() => 'blob:coc-5');
+    const original = window.URL.createObjectURL;
+    window.URL.createObjectURL = createSpy;
+    try {
+      mockGet.mockResolvedValueOnce(ok(new Blob(['%PDF'])));
+      expect(await api.fetchCocPdf(5)).toBe('blob:coc-5');
+      expect(mockGet).toHaveBeenLastCalledWith('/shipping/5/coc/pdf', { responseType: 'blob' });
+    } finally {
+      window.URL.createObjectURL = original;
+    }
   });
 });
