@@ -9,20 +9,31 @@ mount (see ``app/api/router.py``).
 
 import os
 import tempfile
+from datetime import date
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.date_window import LOCAL_DATE_FROM_DESCRIPTION, LOCAL_DATE_TO_DESCRIPTION, company_date_window
 from app.api.deps import get_audit_service, get_current_company_id, get_current_user, require_role
 from app.core.credentials import is_api_token_credential
 from app.core.upload_limits import ensure_upload_within_limit, read_upload_within_limit
 from app.db.database import get_db
+from app.db.tenant_filter import tenant_query
 from app.models.document import Document
 from app.models.laser_nest import LaserNest
 from app.models.user import User, UserRole
-from app.models.work_order import OperationStatus
+from app.models.work_order import OperationStatus, WorkOrder
+from app.schemas.untied_nests import (
+    NestTieCoverageResponse,
+    UntiedNestListResponse,
+    UntiedNestStatusFilter,
+    UntiedSheetReportResponse,
+    WorkOrderNestTieSummary,
+)
 from app.schemas.work_order import (
     LaserNestAttachDocument,
     LaserNestManualResponse,
@@ -47,6 +58,18 @@ from app.services.operation_action_gates import (
     operation_label,
 )
 from app.services.storage_service import is_s3_ref, open_ref_stream, ref_exists
+from app.services.untied_nest_service import (
+    DEFAULT_COVERAGE_MONTHS,
+    DEFAULT_LIST_LIMIT,
+    MAX_COVERAGE_MONTHS,
+    MAX_LIST_LIMIT,
+    UntiedNestFilters,
+    coverage_first_month,
+    list_untied_nests,
+    nest_tie_coverage,
+    untied_sheet_report,
+    work_order_nest_tie_summary,
+)
 from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
 router = APIRouter()
@@ -64,6 +87,121 @@ _NEST_WRITE_ROLES = require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUP
 # Capping at the native size would turn that fallback into a 413 that the manual-nest modal drops
 # silently. Resolved at call time, so this constant is the one tunable; a test pins the relationship.
 LASER_NEST_EXTRACT_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+
+# The untied-nest reads are office planning screens: the same trio that may tie a sheet
+# (``work_order_materials.WRITE_ROLES``), so every row's "Tie this sheet" is a button the
+# reader can actually press. The frontend gates the page and its nav entry on
+# ``work_orders:edit``, which those three roles (and a platform admin) hold. Operators,
+# the kiosk and the dispatch board never read these -- an untied operation renders
+# nothing on a floor screen, by recorded contract.
+_UNTIED_NEST_READ_ROLES = require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])
+
+
+@router.get("/untied", response_model=UntiedNestListResponse)
+def list_untied_laser_nests(
+    status: UntiedNestStatusFilter = Query(
+        "all", description="'open' (not yet complete), 'completed' (in the window) or 'all' (both)"
+    ),
+    work_order_id: Optional[int] = Query(
+        None, description="Only this laser job's nests, or the nests of this assembly job's laser children"
+    ),
+    work_center_id: Optional[int] = Query(None, description="Only nests queued at this work center"),
+    completed_from: Optional[date] = Query(
+        None, description=f"Completed-nest window. {LOCAL_DATE_FROM_DESCRIPTION}. Default: the last 90 days"
+    ),
+    completed_to: Optional[date] = Query(None, description=f"Completed-nest window. {LOCAL_DATE_TO_DESCRIPTION}"),
+    limit: int = Query(DEFAULT_LIST_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_UNTIED_NEST_READ_ROLES),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Laser nests with no sheet tied: open nests, plus nests completed in the window.
+
+    A nest is untied when no OPEN operation-scoped material tie names its operation. Each
+    row carries the job, program number, sheet descriptor and the sheet matcher's answer;
+    ``proposed_tie`` (set only when the matcher identified one part and the job is not
+    finished) is the exact body for ``POST /work-orders/{work_order_id}/material-allocations``.
+    A nest on a finished job is listed with ``tieable: false``.
+
+    Pure read: writes no ledger row, audit row or event. Open nests first, then completed
+    ones newest first.
+    """
+    window_start, window_end = company_date_window(db, company_id, completed_from, completed_to)
+    return list_untied_nests(
+        db,
+        company_id,
+        UntiedNestFilters(
+            status=status,
+            work_order_id=work_order_id,
+            work_center_id=work_center_id,
+            completed_from=window_start,
+            completed_to=window_end,
+            limit=limit,
+            offset=offset,
+        ),
+    )
+
+
+@router.get("/untied/coverage", response_model=NestTieCoverageResponse)
+def get_laser_nest_tie_coverage(
+    months: int = Query(DEFAULT_COVERAGE_MONTHS, ge=1, le=MAX_COVERAGE_MONTHS),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_UNTIED_NEST_READ_ROLES),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Per company-local month: completed laser nests and how many carried a sheet tie.
+
+    One entry per month for the last ``months`` months (the current one included), zeros
+    included, oldest first. Pure read.
+    """
+    first_month = coverage_first_month(db, company_id, months)
+    window_start, _ = company_date_window(db, company_id, first_month, None)
+    return nest_tie_coverage(db, company_id, first_month, months, window_start)
+
+
+@router.get("/untied/sheet-report", response_model=UntiedSheetReportResponse)
+def get_untied_sheet_report(
+    completed_from: Optional[date] = Query(
+        None, description=f"{LOCAL_DATE_FROM_DESCRIPTION}. Default: the last 90 days"
+    ),
+    completed_to: Optional[date] = Query(None, description=LOCAL_DATE_TO_DESCRIPTION),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_UNTIED_NEST_READ_ROLES),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Completed untied nests grouped by sheet spec: sheets burned and the matched stock part.
+
+    Sizes the sheet that left stock without a deduction. Each group names the matcher's
+    part and any scheduled / in-progress cycle count already scoped to it, so the office
+    can count that part through the existing ``POST /inventory/cycle-counts``. Grouping
+    reads free-text descriptors and is approximate. Pure read: no back-dated ledger rows.
+    """
+    window_start, window_end = company_date_window(db, company_id, completed_from, completed_to)
+    return untied_sheet_report(db, company_id, window_start, window_end)
+
+
+@router.get("/work-orders/{work_order_id}/tie-summary", response_model=WorkOrderNestTieSummary)
+def get_work_order_nest_tie_summary(
+    work_order_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_UNTIED_NEST_READ_ROLES),
+    company_id: int = Depends(get_current_company_id),
+):
+    """'N of M nests have no sheet tied' for one job: its own nests plus its laser child jobs'.
+
+    For the Work Order Detail materials panel and the Release confirm, where it is a
+    warning only -- release never refuses an untied nest. A job with no nests answers
+    ``nest_count: 0``. Pure read.
+    """
+    work_order = (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(WorkOrder.id == work_order_id, WorkOrder.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if work_order is None:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return work_order_nest_tie_summary(db, company_id, work_order)
 
 
 @router.post("/extract", response_model=LaserNestPdfExtractionResponse)
