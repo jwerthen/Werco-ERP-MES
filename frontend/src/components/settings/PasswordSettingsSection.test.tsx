@@ -115,8 +115,37 @@ describe('PasswordSettingsSection', () => {
     expect(mockApi.changeOwnPassword).not.toHaveBeenCalled();
   });
 
+  it('is not optimistic: no success and no second request while the change is in flight', async () => {
+    let resolve: (value: ChangeOwnPasswordResponse) => void = () => undefined;
+    mockApi.changeOwnPassword.mockReturnValue(
+      new Promise<ChangeOwnPasswordResponse>(r => {
+        resolve = r;
+      })
+    );
+    renderSection();
+
+    fill('old secret phrase 1', GOOD_NEW, GOOD_NEW);
+    submit();
+
+    await waitFor(() => expect(mockApi.changeOwnPassword).toHaveBeenCalledTimes(1));
+    // While pending: the typed values are still there, nothing claims success, and a
+    // second click does not send a second change.
+    expect(screen.getByLabelText(/^current password/i)).toHaveValue('old secret phrase 1');
+    expect(screen.queryByText(/password changed\. use the new password/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /chang/i }));
+    expect(mockApi.changeOwnPassword).toHaveBeenCalledTimes(1);
+
+    resolve({ message: 'Password changed successfully' });
+    expect(await screen.findByText(/password changed\. use the new password/i)).toBeInTheDocument();
+  });
+
   it.each([
     [400, 'Current password is incorrect'],
+    [422, 'Value error, Password must be at least 12 characters long'],
+    [
+      403,
+      'Your password is changed by you, signed in to the app: an API token or a shop-floor badge or station token cannot change a password.',
+    ],
     [503, 'Unable to save audit record'],
   ])(
     'shows the server %s detail verbatim, keeps the typed values, and never toasts success',
