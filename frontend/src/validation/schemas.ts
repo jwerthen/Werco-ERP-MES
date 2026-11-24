@@ -675,7 +675,7 @@ export const changeOwnPasswordSchema = z
     new_password: passwordStrengthSchema,
     confirm_password: z.string().min(1, 'Re-enter the new password'),
   })
-  .refine((data) => data.new_password === data.confirm_password, {
+  .refine(data => data.new_password === data.confirm_password, {
     path: ['confirm_password'],
     error: 'The two new passwords do not match',
   });
