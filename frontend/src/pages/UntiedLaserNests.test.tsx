@@ -324,4 +324,40 @@ describe('UntiedLaserNests — sheet report', () => {
     );
     await waitFor(() => expect(mockedApi.getUntiedSheetReport).toHaveBeenCalledTimes(2));
   });
+
+  it('shows a cycle-count refusal verbatim and keeps the dialog open', async () => {
+    mockedApi.getUntiedSheetReport.mockResolvedValue(REPORT);
+    mockedApi.createCycleCount.mockRejectedValue({ response: { status: 404, data: { detail: 'Part not found' } } });
+    renderPage('/laser-nests/untied?view=sheets');
+
+    fireEvent.click((await screen.findAllByRole('button', { name: /start cycle count/i }))[0]);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /start cycle count/i }));
+
+    expect(await within(dialog).findByTestId('start-sheet-count-error')).toHaveTextContent('Part not found');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(mockedApi.getUntiedSheetReport).toHaveBeenCalledTimes(1);
+  });
+
+  it('says when the report was cut short and marks the total as a floor', async () => {
+    mockedApi.getUntiedSheetReport.mockResolvedValue({ ...REPORT, truncated: true });
+    renderPage('/laser-nests/untied?view=sheets');
+    expect(await screen.findByTestId('untied-sheet-report-truncated')).toBeInTheDocument();
+    expect(screen.getByText('≥ 11')).toBeInTheDocument();
+  });
+});
+
+describe('UntiedLaserNests — load failures', () => {
+  it('shows the worklist error with a working Retry', async () => {
+    mockedApi.getUntiedLaserNests
+      .mockRejectedValueOnce({ response: { status: 500, data: { detail: 'Server exploded' } } })
+      .mockResolvedValue(listOf([row()]));
+    renderPage();
+
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    fireEvent.click(retry);
+    expect(await screen.findByText('CNC-1001')).toBeInTheDocument();
+    expect(mockedApi.getUntiedLaserNests).toHaveBeenCalledTimes(2);
+    expect(mockedApi.tieNestSheet).not.toHaveBeenCalled();
+  });
 });

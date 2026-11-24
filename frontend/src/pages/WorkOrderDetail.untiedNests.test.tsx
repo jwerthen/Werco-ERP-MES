@@ -208,6 +208,57 @@ describe('WorkOrderDetail — untied laser nests', () => {
     expect(mockedApi.releaseWorkOrder).toHaveBeenCalledWith(42);
   });
 
+  it('"Not yet" closes the warning without releasing', async () => {
+    mockedApi.getWorkOrderNestTieSummary.mockResolvedValue(summary());
+    renderDetail();
+    await screen.findByTestId('wo-nest-tie-summary');
+
+    await act(async () => {
+      fireEvent.click(releaseButton());
+    });
+    const dialog = await screen.findByRole('dialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /not yet/i }));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(mockedApi.releaseWorkOrder).not.toHaveBeenCalled();
+    expect(releaseButton()).toBeInTheDocument();
+  });
+
+  it('names a whole-job tie in the Release warning', async () => {
+    mockedApi.getWorkOrderNestTieSummary.mockResolvedValue(summary({ job_level_tie_count: 1 }));
+    renderDetail();
+    await screen.findByTestId('wo-nest-tie-summary');
+
+    await act(async () => {
+      fireEvent.click(releaseButton());
+    });
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent(/1 whole-work-order material tie;/);
+    expect(dialog).toHaveTextContent(/draw the same sheet twice/);
+  });
+
+  it('never blocks Release: a failed click-time re-read still releases', async () => {
+    mockedApi.getWorkOrderNestTieSummary.mockResolvedValueOnce(summary()).mockRejectedValue(new Error('network down'));
+    renderDetail();
+    await screen.findByTestId('wo-nest-tie-summary');
+
+    await act(async () => {
+      fireEvent.click(releaseButton());
+    });
+    await waitFor(() => expect(mockedApi.releaseWorkOrder).toHaveBeenCalledWith(42));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('renders nothing when the summary read is refused', async () => {
+    mockedApi.getWorkOrderNestTieSummary.mockRejectedValue({ response: { status: 403 } });
+    renderDetail();
+    await screen.findAllByText('Laser Cut');
+    await waitFor(() => expect(mockedApi.getWorkOrderNestTieSummary).toHaveBeenCalled());
+    expect(screen.queryByTestId('wo-nest-tie-summary')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('never reads the summary for a role below work_orders:edit', async () => {
     mockUser = { id: 2, role: 'quality', is_superuser: false };
     renderDetail();
