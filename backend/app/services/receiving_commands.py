@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
@@ -49,6 +49,40 @@ class StockTraceability:
 
 
 NO_TRACEABILITY = StockTraceability()
+
+# Stock-row traceability column -> the words a mismatch note uses for it.
+_TRACE_COLUMN_LABELS = {"heat_lot": "heat", "cert_number": "cert", "supplier_id": "supplier id"}
+
+
+def merge_traceability_into_row(
+    row: InventoryItem, incoming: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    """Merge incoming traceability into an EXISTING stock row: the first value wins.
+
+    A blank row column takes the incoming value; a filled one is never overwritten. When the
+    incoming value differs from a value the row already holds, the row now holds material of
+    two heats (or certs, or suppliers) under one value, so the difference is returned as a
+    note for the caller to put on the ledger row and the audit row -- the mixed material is
+    then on record instead of dropped silently. Returns ``(old_values, new_values, notes)``
+    for the filled columns. Strings are compared stripped, as ``blank_to_none`` stores them.
+    """
+    old_values: Dict[str, Any] = {}
+    new_values: Dict[str, Any] = {}
+    notes: List[str] = []
+    for column, raw in incoming.items():
+        value = blank_to_none(raw) if isinstance(raw, str) else raw
+        if value is None:
+            continue
+        current = getattr(row, column)
+        current_cmp = blank_to_none(current) if isinstance(current, str) else current
+        if current_cmp is None:
+            old_values[column] = current
+            setattr(row, column, value)
+            new_values[column] = value
+        elif current_cmp != value:
+            label = _TRACE_COLUMN_LABELS.get(column, column)
+            notes.append(f"{label} received {value} differs from stock row {label} {current_cmp}")
+    return old_values, new_values, notes
 
 
 def receipt_traceability(receipt: POReceipt, po: Optional[PurchaseOrder]) -> StockTraceability:
@@ -397,7 +431,9 @@ def _add_to_inventory(
     ``traceability`` (``receipt_traceability``) puts the receipt's heat, cert and the PO's
     vendor on the stock row. A NEW row takes all three. When the material merges into an
     EXISTING row, the first value wins: a field the row already carries is never
-    overwritten, and only a blank one is filled (and the fill rides the merge's audit row).
+    overwritten, and only a blank one is filled (and the fill rides the merge's audit row). An
+    incoming value that DIFFERS from the row's is named on the RECEIVE ledger row and in the
+    merge's audit description, so a lot holding two heats says so.
     Every PO-receipt caller passes it -- dock-to-stock, the inspection accept and the
     cleared hold. The default is no traceability, so any other caller is unchanged.
     """
@@ -417,6 +453,7 @@ def _add_to_inventory(
     # Company stock keeps its pre-129 audit wording; owned property says whose it is.
     owned_suffix = "" if owner.is_company else f" as {ownership_label(owner.key, owner.owner_name)} property"
 
+    trace_mismatches: List[str] = []
     if existing:
         old_values: Dict[str, Any] = {
             "quantity_on_hand": existing.quantity_on_hand,
@@ -428,13 +465,11 @@ def _add_to_inventory(
             "quantity_on_hand": existing.quantity_on_hand,
             "quantity_available": existing.quantity_available,
         }
-        # First value wins on a merge: fill only what the row is missing.
-        for column, value in traceability.stock_columns().items():
-            current = getattr(existing, column)
-            if value is not None and (current is None or (isinstance(current, str) and not current.strip())):
-                old_values[column] = current
-                setattr(existing, column, value)
-                new_values[column] = value
+        # First value wins on a merge: fill only what the row is missing, and put a differing
+        # incoming heat / cert / supplier on record rather than drop it.
+        filled_old, filled_new, trace_mismatches = merge_traceability_into_row(existing, traceability.stock_columns())
+        old_values.update(filled_old)
+        new_values.update(filled_new)
         inv_item = existing
         audit.log_update(
             "inventory",
@@ -444,7 +479,7 @@ def _add_to_inventory(
             new_values=new_values,
             description=(
                 f"Added {quantity} to inventory part {part_id} lot {lot_number} at {location} via {reference}"
-                f"{owned_suffix}"
+                f"{owned_suffix}" + "".join(f"; {note}" for note in trace_mismatches)
             ),
         )
     else:
@@ -490,7 +525,10 @@ def _add_to_inventory(
         reference_type="po_receipt",
         reference_number=reference,
         reason_code=reason_code,
-        notes=(notes or f"Received from {supplier_name or 'vendor'} via {reference}"),
+        notes=(
+            (notes or f"Received from {supplier_name or 'vendor'} via {reference}")
+            + "".join(f"; {note}" for note in trace_mismatches)
+        ),
         created_by=user_id,
     )
     txn.company_id = company_id

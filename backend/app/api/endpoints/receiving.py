@@ -75,7 +75,7 @@ from app.schemas.purchasing import (
 )
 from app.services.audit_service import AuditService
 from app.services.operational_event_service import OperationalEventService
-from app.services.owned_property_service import recorded_owner
+from app.services.owned_property_service import ownership_key, ownership_match_clauses, recorded_owner
 from app.services.print_service import PrintEgressDisabledError, PrintService
 from app.services.proxybox_client import ProxyBoxError
 from app.services.receiving_commands import (
@@ -877,7 +877,7 @@ def _sync_receipt_traceability_to_stock(
     *,
     company_id: int,
     audit: AuditService,
-) -> None:
+) -> List[int]:
     """Carry a corrected heat / cert from a dock-to-stock receipt onto the stock row it placed.
 
     The receipt and its stock row both hold the heat and cert (``_add_to_inventory`` stamps
@@ -888,6 +888,13 @@ def _sync_receipt_traceability_to_stock(
     the other receipt's traceability. A receipt whose stock row cannot be resolved (the
     legacy ambiguity ``_receipt_stock_row`` refuses) changes the receipt only, as before;
     the trace page then reads the receipt's value wherever the row is blank.
+
+    Known limit: a row that ``POST /inventory/transfer`` CREATED from the placed row copied its
+    heat and cert, and is not rewritten here -- the transfer ledger row names only its source
+    row, and a destination that existed before the move holds other material too. Those rows
+    (same part, lot and owner at a location the placed row was transferred to, still holding
+    the receipt's OLD value) are returned instead, so the correction's audit row names them
+    for a person to correct by hand. One hop only: a second transfer onward is not followed.
     """
     changed = [
         (receipt_col, stock_col)
@@ -895,7 +902,7 @@ def _sync_receipt_traceability_to_stock(
         if blank_to_none(old_receipt_values.get(receipt_col)) != blank_to_none(getattr(receipt, receipt_col))
     ]
     if not changed:
-        return
+        return []
     location_code = receipt.location.code if receipt.location else "RECV-01"
     # Flush first: the session does not autoflush, and ``_receipt_stock_row`` reloads the row
     # with ``populate_existing`` -- unflushed, the quantity the reconcile just moved on that
@@ -904,7 +911,7 @@ def _sync_receipt_traceability_to_stock(
     try:
         inv_item = _receipt_stock_row(db, receipt, po_line, company_id=company_id, location_code=location_code)
     except HTTPException:
-        return
+        return []
     shared = (
         db.query(InventoryTransaction.id)
         .filter(
@@ -929,16 +936,74 @@ def _sync_receipt_traceability_to_stock(
             old_values[stock_col] = getattr(inv_item, stock_col)
             setattr(inv_item, stock_col, target)
             new_values[stock_col] = target
-    if not new_values:
-        return
-    audit.log_update(
-        "inventory",
-        inv_item.id,
-        f"{inv_item.part_id}/{inv_item.lot_number}@{inv_item.location}",
-        old_values=old_values,
-        new_values=new_values,
-        description=f"Traceability corrected from receipt {receipt.receipt_number}",
+    copied_row_ids = _transfer_copies_holding_old_trace(
+        db, inv_item, receipt, changed, old_receipt_values, company_id=company_id
     )
+    if new_values:
+        audit.log_update(
+            "inventory",
+            inv_item.id,
+            f"{inv_item.part_id}/{inv_item.lot_number}@{inv_item.location}",
+            old_values=old_values,
+            new_values=new_values,
+            description=f"Traceability corrected from receipt {receipt.receipt_number}",
+        )
+    return copied_row_ids
+
+
+def _transfer_copies_holding_old_trace(
+    db: Session,
+    inv_item: InventoryItem,
+    receipt: POReceipt,
+    changed: list,
+    old_receipt_values: dict,
+    *,
+    company_id: int,
+) -> List[int]:
+    """Stock rows a transfer out of ``inv_item`` may have copied the receipt's OLD heat / cert to.
+
+    Read-only: rows of the same company, part, lot and owner at a location ``inv_item`` was
+    transferred to, whose changed column still holds the receipt's old value. See the known
+    limit in ``_sync_receipt_traceability_to_stock``.
+    """
+    to_locations = {
+        row[0]
+        for row in db.query(InventoryTransaction.to_location).filter(
+            InventoryTransaction.company_id == company_id,
+            InventoryTransaction.inventory_item_id == inv_item.id,
+            InventoryTransaction.transaction_type == TransactionType.TRANSFER,
+            InventoryTransaction.to_location.isnot(None),
+        )
+    }
+    if not to_locations:
+        return []
+    lot_clause = (
+        InventoryItem.lot_number.is_(None)
+        if inv_item.lot_number is None
+        else InventoryItem.lot_number == inv_item.lot_number
+    )
+    candidates = (
+        db.query(InventoryItem)
+        .filter(
+            InventoryItem.company_id == company_id,
+            InventoryItem.id != inv_item.id,
+            InventoryItem.part_id == inv_item.part_id,
+            lot_clause,
+            InventoryItem.location.in_(to_locations),
+            *ownership_match_clauses(ownership_key(inv_item)),
+        )
+        .order_by(InventoryItem.id)
+        .all()
+    )
+    drifted: List[int] = []
+    for row in candidates:
+        for receipt_col, stock_col in changed:
+            old = blank_to_none(old_receipt_values.get(receipt_col))
+            current = blank_to_none(getattr(row, stock_col))
+            if old is not None and current == old and current != blank_to_none(getattr(receipt, receipt_col)):
+                drifted.append(row.id)
+                break
+    return drifted
 
 
 def _reconcile_receipt_quantity(
@@ -1248,10 +1313,12 @@ def correct_receipt(
         new_lot = payload.lot_number.strip()
         if new_lot:
             receipt.lot_number = new_lot
+    # Stored trimmed, as the stock row stores them (``blank_to_none``): a cleared value is
+    # NULL on both records, never '' on one and NULL on the other.
     if payload.heat_number is not None:
-        receipt.heat_number = payload.heat_number
+        receipt.heat_number = blank_to_none(payload.heat_number)
     if payload.cert_number is not None:
-        receipt.cert_number = payload.cert_number
+        receipt.cert_number = blank_to_none(payload.cert_number)
     if payload.serial_numbers is not None:
         receipt.serial_numbers = payload.serial_numbers
     if payload.notes is not None:
@@ -1260,8 +1327,11 @@ def correct_receipt(
     # Dock-to-stock (or cleared-hold) material already sits on a stock row carrying the
     # receipt's heat and cert; keep that row in step with the corrected receipt. A held
     # receipt has no stock row yet -- its accept or clear stamps the corrected values.
+    stale_copy_row_ids: List[int] = []
     if inventory_placed:
-        _sync_receipt_traceability_to_stock(db, receipt, po_line, old_values, company_id=company_id, audit=audit)
+        stale_copy_row_ids = _sync_receipt_traceability_to_stock(
+            db, receipt, po_line, old_values, company_id=company_id, audit=audit
+        )
 
     new_values = {
         "quantity_received": receipt.quantity_received,
@@ -1278,7 +1348,14 @@ def correct_receipt(
         receipt.receipt_number,
         old_values=old_values,
         new_values=new_values,
-        description=f"Corrected receipt: {payload.reason}",
+        description=f"Corrected receipt: {payload.reason}"
+        + (
+            "; stock rows transferred from this receipt's row still hold the old heat/cert: "
+            + ", ".join(str(row_id) for row_id in stale_copy_row_ids)
+            if stale_copy_row_ids
+            else ""
+        ),
+        extra_data={"stale_traceability_stock_row_ids": stale_copy_row_ids} if stale_copy_row_ids else None,
     )
 
     db.commit()

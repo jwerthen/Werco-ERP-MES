@@ -608,10 +608,13 @@ def search_lots(
         .all()
     )
 
+    # Lot hits are keyed on (lot, part): lot numbers repeat across parts, so part A's stock
+    # row must not hide part B's receipt of the same lot number.
     seen = set()
+    seen_lots: set = set()
     for item in items:
-        if item.lot_number and item.lot_number not in seen:
-            seen.add(item.lot_number)
+        if item.lot_number and (item.lot_number, item.part_id) not in seen_lots:
+            seen_lots.add((item.lot_number, item.part_id))
             results.append(
                 {
                     "type": "lot",
@@ -657,8 +660,9 @@ def search_lots(
     )
     new_receipts = []
     for receipt in receipts:
-        if receipt.lot_number and receipt.lot_number not in seen:
-            seen.add(receipt.lot_number)
+        lot_key = (receipt.lot_number, receipt.po_line.part_id if receipt.po_line else None)
+        if receipt.lot_number and lot_key not in seen_lots:
+            seen_lots.add(lot_key)
             new_receipts.append(receipt)
     # On hand is the lot's stock for that receipt's part (lot AND part: lot numbers repeat
     # across parts); zero for a lot that has not reached stock. One batched read.

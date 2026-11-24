@@ -791,3 +791,210 @@ def test_search_lists_a_lot_once_when_both_the_row_and_its_receipt_match(client:
     hits = [r for r in results if r["number"] == lot]
     assert len(hits) == 1
     assert (hits[0]["heat_lot"], float(hits[0]["quantity"])) == ("H-DUP", 5)
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: mixed heats are put on record, transfer copies are flagged,
+# lot search keys on lot AND part, Correct stores the trimmed value
+# ---------------------------------------------------------------------------
+
+
+def test_po_merge_with_a_different_heat_puts_both_on_record(client: TestClient, db_session: Session):
+    from app.models.inventory import InventoryTransaction
+
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=20)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive(client, admin, line, lot=lot, heat="H-ONE", cert="MC-ONE")
+    second = _receive(client, admin, line, lot=lot, heat="H-TWO", cert="MC-ONE")
+
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-ONE"
+    note = "heat received H-TWO differs from stock row heat H-ONE"
+    merge_audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "inventory", AuditLog.resource_id == row.id, AuditLog.action == "UPDATE")
+        .order_by(AuditLog.sequence_number.desc())
+        .first()
+    )
+    assert note in merge_audit.description
+    assert "cert received" not in merge_audit.description
+    txn = (
+        db_session.query(InventoryTransaction)
+        .filter(InventoryTransaction.reference_number == second["receipt_number"])
+        .one()
+    )
+    assert note in txn.notes
+
+
+def test_manual_receive_into_existing_row_fills_blank_heat_and_cert(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    loc = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, admin, line.part_id, loc.code, lot)
+    _receive_manual(client, admin, line.part_id, loc.code, lot, heat_lot=" H-7781 ", cert_number="C-55")
+
+    (row,) = _stock_rows(db_session, lot)
+    assert float(row.quantity_on_hand) == 20
+    assert (row.heat_lot, row.cert_number) == ("H-7781", "C-55")
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "inventory", AuditLog.resource_id == row.id, AuditLog.action == "UPDATE")
+        .order_by(AuditLog.sequence_number.desc())
+        .first()
+    )
+    changes = audit_row.extra_data["changes"]
+    assert changes["heat_lot"]["new"] == "H-7781"
+    assert changes["cert_number"]["new"] == "C-55"
+
+
+def test_manual_receive_with_a_different_heat_keeps_the_row_and_records_the_incoming(
+    client: TestClient, db_session: Session
+):
+    from app.models.inventory import InventoryTransaction, TransactionType
+
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    loc = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, admin, line.part_id, loc.code, lot, heat_lot="H-1111")
+    _receive_manual(client, admin, line.part_id, loc.code, lot, heat_lot="H-2222", notes="Second skid")
+
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-1111"
+    txn = (
+        db_session.query(InventoryTransaction)
+        .filter(
+            InventoryTransaction.inventory_item_id == row.id,
+            InventoryTransaction.transaction_type == TransactionType.RECEIVE,
+        )
+        .order_by(InventoryTransaction.id.desc())
+        .first()
+    )
+    note = "heat received H-2222 differs from stock row heat H-1111"
+    assert txn.notes == f"Second skid; {note}"
+    audit_row = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.resource_type == "inventory", AuditLog.resource_id == row.id, AuditLog.action == "UPDATE")
+        .order_by(AuditLog.sequence_number.desc())
+        .first()
+    )
+    assert note in audit_row.description
+
+
+def test_correct_flags_a_transfer_copy_still_holding_the_old_heat(client: TestClient, db_session: Session):
+    """Known limit: the copy a transfer made is not rewritten, but the correction names it."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    src = make_location(db_session, company_id=1)
+    dst = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={
+            "po_line_id": line.id,
+            "quantity_received": 5,
+            "lot_number": lot,
+            "heat_number": "H1",
+            "requires_inspection": False,
+            "location_id": src.id,
+        },
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    receipt = resp.json()
+    (placed,) = _stock_rows(db_session, lot)
+    resp = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers_for(admin),
+        json={"inventory_item_id": placed.id, "quantity": 2, "to_location_code": dst.code},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    copy = next(r for r in _stock_rows(db_session, lot) if r.location == dst.code)
+    assert copy.heat_lot == "H1"
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 5, "heat_number": "H1-A", "reason": "Heat mis-keyed."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    rows = {r.location: r for r in _stock_rows(db_session, lot)}
+    assert rows[src.code].heat_lot == "H1-A"
+    assert rows[dst.code].heat_lot == "H1"
+    receipt_audit = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "receipt",
+            AuditLog.resource_id == receipt["id"],
+            AuditLog.description.like("Corrected receipt:%"),
+        )
+        .one()
+    )
+    assert receipt_audit.extra_data["stale_traceability_stock_row_ids"] == [copy.id]
+    assert str(copy.id) in receipt_audit.description
+
+
+def test_correct_without_a_transfer_flags_nothing(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat="H-X")
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 5, "heat_number": "H-Y", "reason": "Heat mis-keyed."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    receipt_audit = (
+        db_session.query(AuditLog)
+        .filter(
+            AuditLog.resource_type == "receipt",
+            AuditLog.resource_id == receipt["id"],
+            AuditLog.description.like("Corrected receipt:%"),
+        )
+        .one()
+    )
+    assert "stale_traceability_stock_row_ids" not in receipt_audit.extra_data
+
+
+def test_correct_stores_the_trimmed_heat_and_clears_to_null(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat="H-OLD", cert="MC-OLD")
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 5, "heat_number": " H2 ", "cert_number": "  ", "reason": "Cert withdrawn."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    db_session.expire_all()
+    stored = db_session.get(POReceipt, receipt["id"])
+    assert (stored.heat_number, stored.cert_number) == ("H2", None)
+    (row,) = _stock_rows(db_session, lot)
+    assert (row.heat_lot, row.cert_number) == ("H2", None)
+
+
+def test_search_keys_receipt_lot_hits_on_part_as_well_as_lot(client: TestClient, db_session: Session):
+    """Part A's stock row of lot L must not hide part B's held receipt of lot L."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line_a = make_po_line(db_session, company_id=1)
+    line_b = make_po_line(db_session, company_id=1)
+    loc = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    heat = f"HEATB{_next():05d}"
+    _receive_manual(client, admin, line_a.part_id, loc.code, lot)
+    _receive(client, admin, line_b, lot=lot, heat=heat, requires_inspection=True)
+    part_b = db_session.get(Part, line_b.part_id)
+    part_a = db_session.get(Part, line_a.part_id)
+
+    by_heat = client.get("/api/v1/traceability/search", params={"q": heat}, headers=headers_for(admin)).json()
+    (hit,) = [r for r in by_heat if r["number"] == lot]
+    assert (hit["part_number"], hit["heat_lot"]) == (part_b.part_number, heat)
+
+    by_lot = client.get("/api/v1/traceability/search", params={"q": lot}, headers=headers_for(admin)).json()
+    assert sorted(r["part_number"] for r in by_lot if r["number"] == lot) == sorted(
+        [part_a.part_number, part_b.part_number]
+    )

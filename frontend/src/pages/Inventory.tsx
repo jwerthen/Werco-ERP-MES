@@ -1295,8 +1295,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
             </FormField>
           </div>
           <p className="text-xs text-slate-400">
-            Heat and cert are recorded on a new stock record. Receiving into a lot already at this location keeps
-            that record&apos;s own heat and cert.
+            Heat and cert are recorded on a new stock record. Receiving into a lot already at this location fills
+            a blank heat or cert and keeps any it already has; a different heat or cert is noted on the movement.
           </p>
           <FormField label="Unit Cost">
             {field => (

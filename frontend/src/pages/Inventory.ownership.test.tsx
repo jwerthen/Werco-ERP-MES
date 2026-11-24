@@ -282,7 +282,7 @@ it('caps heat and cert at the column width and tells the user a merge keeps the 
   const dialog = await openReceive();
   expect(within(dialog).getByRole('textbox', { name: /^Heat/ })).toHaveAttribute('maxLength', '100');
   expect(within(dialog).getByRole('textbox', { name: /^Cert/ })).toHaveAttribute('maxLength', '100');
-  expect(within(dialog).getByText(/keeps\s+that record.s own heat and cert/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/fills\s+a blank heat or cert and keeps any it already has/)).toBeInTheDocument();
 });
 
 it('shows each stock row’s heat in the detail table', async () => {
