@@ -63,6 +63,10 @@ interface InventoryItem extends OwnershipInfo {
   quantity_available: number;
   lot_number?: string;
   serial_number?: string;
+  // Mill heat and cert on the stock row. PO receipts stamp them on the row they
+  // create; a blank here is still filled on the Traceability page from the receipt.
+  heat_lot?: string | null;
+  cert_number?: string | null;
   status: string;
   unit_cost: number;
 }
@@ -199,6 +203,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     lot_number: '',
     serial_number: '',
     po_number: '',
+    heat_lot: '',
+    cert_number: '',
     unit_cost: 0,
   });
   const [receiveOwnership, setReceiveOwnership] = useState<OwnershipSelection>(COMPANY_OWNERSHIP);
@@ -352,7 +358,16 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
     setActionBusy(true);
     setActionError('');
     try {
-      await api.receiveInventory({ ...receiveForm, ...ownershipPayload(receiveOwnership) });
+      // Heat and cert are traceability evidence: send them trimmed, and omit a blank
+      // one rather than store an empty string the trace would read as a value.
+      const heatLot = receiveForm.heat_lot.trim();
+      const certNumber = receiveForm.cert_number.trim();
+      await api.receiveInventory({
+        ...receiveForm,
+        heat_lot: heatLot || undefined,
+        cert_number: certNumber || undefined,
+        ...ownershipPayload(receiveOwnership),
+      });
       setShowReceiveModal(false);
       setReceiveOwnership(COMPANY_OWNERSHIP);
       setReceiveForm({
@@ -362,6 +377,8 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         lot_number: '',
         serial_number: '',
         po_number: '',
+        heat_lot: '',
+        cert_number: '',
         unit_cost: 0,
       });
       loadData();
@@ -622,6 +639,14 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         render: item => item.lot_number || '-',
       },
       {
+        key: 'heat',
+        header: 'Heat',
+        sortable: true,
+        className: 'font-mono text-sm',
+        accessor: item => item.heat_lot ?? '',
+        render: item => item.heat_lot || '-',
+      },
+      {
         // Company stock renders nothing — only property that is NOT the company's is
         // labelled. The CSV spells company out so an exported row is never ambiguous.
         key: 'ownership',
@@ -771,6 +796,10 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
         {
           label: 'Lot #',
           value: item.lot_number || '-',
+        },
+        {
+          label: 'Heat',
+          value: <span className="font-mono">{item.heat_lot || '-'}</span>,
         },
         ...(ownershipLabel(item) ? [{ label: 'Ownership', value: <OwnershipChip record={item} />, fullWidth: true }] : []),
         {
@@ -1280,6 +1309,38 @@ export default function InventoryPage({ embedded }: { embedded?: boolean }) {
               )}
             </FormField>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FormField label="Heat" help="Mill heat number from the cert.">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.heat_lot}
+                  onChange={e => setReceiveForm({ ...receiveForm, heat_lot: e.target.value })}
+                  className="input font-mono"
+                  maxLength={100}
+                  autoComplete="off"
+                />
+              )}
+            </FormField>
+            <FormField label="Cert" help="Mill cert or CoC number.">
+              {field => (
+                <input
+                  {...field}
+                  type="text"
+                  value={receiveForm.cert_number}
+                  onChange={e => setReceiveForm({ ...receiveForm, cert_number: e.target.value })}
+                  className="input font-mono"
+                  maxLength={100}
+                  autoComplete="off"
+                />
+              )}
+            </FormField>
+          </div>
+          <p className="text-xs text-slate-400">
+            Heat and cert are recorded on a new stock record. Receiving into a lot already at this location fills
+            a blank heat or cert and keeps any it already has; a different heat or cert is noted on the movement.
+          </p>
           <FormField label="Unit Cost">
             {field => (
               <input

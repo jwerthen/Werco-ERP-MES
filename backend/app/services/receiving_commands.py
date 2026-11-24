@@ -1,7 +1,8 @@
 """Canonical commit-free receiving, stock and numbering commands."""
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
@@ -18,6 +19,79 @@ from app.services.owned_property_service import (
     ownership_match_clauses,
     resolve_owner,
 )
+
+
+def blank_to_none(value: Optional[str]) -> Optional[str]:
+    """A traceability string as a stock row stores it: stripped, and ``None`` when blank."""
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped or None
+
+
+@dataclass(frozen=True)
+class StockTraceability:
+    """The mill heat, cert number and supplier a PO receipt hands to the stock row it creates.
+
+    The receipt is the record of what arrived (``po_receipts.heat_number`` / ``cert_number``,
+    the PO's vendor); before this the stock row it created carried only the lot, cost and
+    receipt number, so the heat and cert stopped at the dock. ``supplier_id`` is the PO's
+    vendor id even when that vendor is soft-deleted: the supplier of record is history
+    (invariant 3's records-vs-selection exception), not a selection.
+    """
+
+    heat_lot: Optional[str] = None
+    cert_number: Optional[str] = None
+    supplier_id: Optional[int] = None
+
+    def stock_columns(self) -> Dict[str, Any]:
+        return {"heat_lot": self.heat_lot, "cert_number": self.cert_number, "supplier_id": self.supplier_id}
+
+
+NO_TRACEABILITY = StockTraceability()
+
+# Stock-row traceability column -> the words a mismatch note uses for it.
+_TRACE_COLUMN_LABELS = {"heat_lot": "heat", "cert_number": "cert", "supplier_id": "supplier id"}
+
+
+def merge_traceability_into_row(
+    row: InventoryItem, incoming: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    """Merge incoming traceability into an EXISTING stock row: the first value wins.
+
+    A blank row column takes the incoming value; a filled one is never overwritten. When the
+    incoming value differs from a value the row already holds, the row now holds material of
+    two heats (or certs, or suppliers) under one value, so the difference is returned as a
+    note for the caller to put on the ledger row and the audit row -- the mixed material is
+    then on record instead of dropped silently. Returns ``(old_values, new_values, notes)``
+    for the filled columns. Strings are compared stripped, as ``blank_to_none`` stores them.
+    """
+    old_values: Dict[str, Any] = {}
+    new_values: Dict[str, Any] = {}
+    notes: List[str] = []
+    for column, raw in incoming.items():
+        value = blank_to_none(raw) if isinstance(raw, str) else raw
+        if value is None:
+            continue
+        current = getattr(row, column)
+        current_cmp = blank_to_none(current) if isinstance(current, str) else current
+        if current_cmp is None:
+            old_values[column] = current
+            setattr(row, column, value)
+            new_values[column] = value
+        elif current_cmp != value:
+            label = _TRACE_COLUMN_LABELS.get(column, column)
+            notes.append(f"{label} received {value} differs from stock row {label} {current_cmp}")
+    return old_values, new_values, notes
+
+
+def receipt_traceability(receipt: POReceipt, po: Optional[PurchaseOrder]) -> StockTraceability:
+    """The traceability a receipt carries to stock: its heat and cert, and the PO's vendor."""
+    return StockTraceability(
+        heat_lot=blank_to_none(receipt.heat_number),
+        cert_number=blank_to_none(receipt.cert_number),
+        supplier_id=po.vendor_id if po is not None else None,
+    )
 
 
 def resolve_receipt_owner(db: Session, company_id: int, receipt_in) -> ResolvedOwner:
@@ -262,6 +336,7 @@ def _receive_material(receipt_in, db, current_user, company_id, audit, *, checke
             audit,
             po.vendor.name if po.vendor else None,
             owner=owner,
+            traceability=receipt_traceability(receipt, po),
         )
 
     # Audit log (tamper-evident hash chain via the request-scoped AuditService)
@@ -332,6 +407,7 @@ def _add_to_inventory(
     notes: Optional[str] = None,
     *,
     owner: ResolvedOwner = COMPANY_OWNER,
+    traceability: StockTraceability = NO_TRACEABILITY,
 ) -> InventoryItem:
     """Add received material to inventory with full traceability.
 
@@ -351,6 +427,15 @@ def _add_to_inventory(
     is rendered, and an unstamped row there is indistinguishable from a normal
     receive. Same stamping the correct/void reconciler does with RECEIPT_VOID /
     RECEIPT_CORRECTION.
+
+    ``traceability`` (``receipt_traceability``) puts the receipt's heat, cert and the PO's
+    vendor on the stock row. A NEW row takes all three. When the material merges into an
+    EXISTING row, the first value wins: a field the row already carries is never
+    overwritten, and only a blank one is filled (and the fill rides the merge's audit row). An
+    incoming value that DIFFERS from the row's is named on the RECEIVE ledger row and in the
+    merge's audit description, so a lot holding two heats says so.
+    Every PO-receipt caller passes it -- dock-to-stock, the inspection accept and the
+    cleared hold. The default is no traceability, so any other caller is unchanged.
     """
     # Check for existing inventory at location with same lot and owner (scoped to the company)
     existing = (
@@ -368,26 +453,33 @@ def _add_to_inventory(
     # Company stock keeps its pre-129 audit wording; owned property says whose it is.
     owned_suffix = "" if owner.is_company else f" as {ownership_label(owner.key, owner.owner_name)} property"
 
+    trace_mismatches: List[str] = []
     if existing:
-        old_values = {
+        old_values: Dict[str, Any] = {
             "quantity_on_hand": existing.quantity_on_hand,
             "quantity_available": existing.quantity_available,
         }
         existing.quantity_on_hand += quantity
         existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
+        new_values: Dict[str, Any] = {
+            "quantity_on_hand": existing.quantity_on_hand,
+            "quantity_available": existing.quantity_available,
+        }
+        # First value wins on a merge: fill only what the row is missing, and put a differing
+        # incoming heat / cert / supplier on record rather than drop it.
+        filled_old, filled_new, trace_mismatches = merge_traceability_into_row(existing, traceability.stock_columns())
+        old_values.update(filled_old)
+        new_values.update(filled_new)
         inv_item = existing
         audit.log_update(
             "inventory",
             inv_item.id,
             f"{part_id}/{lot_number}@{location}",
             old_values=old_values,
-            new_values={
-                "quantity_on_hand": inv_item.quantity_on_hand,
-                "quantity_available": inv_item.quantity_available,
-            },
+            new_values=new_values,
             description=(
                 f"Added {quantity} to inventory part {part_id} lot {lot_number} at {location} via {reference}"
-                f"{owned_suffix}"
+                f"{owned_suffix}" + "".join(f"; {note}" for note in trace_mismatches)
             ),
         )
     else:
@@ -403,6 +495,7 @@ def _add_to_inventory(
             po_number=reference,
             status="available",
             is_active=True,
+            **traceability.stock_columns(),
             **owner.columns(),
         )
         inv_item.company_id = company_id
@@ -432,7 +525,10 @@ def _add_to_inventory(
         reference_type="po_receipt",
         reference_number=reference,
         reason_code=reason_code,
-        notes=(notes or f"Received from {supplier_name or 'vendor'} via {reference}"),
+        notes=(
+            (notes or f"Received from {supplier_name or 'vendor'} via {reference}")
+            + "".join(f"; {note}" for note in trace_mismatches)
+        ),
         created_by=user_id,
     )
     txn.company_id = company_id

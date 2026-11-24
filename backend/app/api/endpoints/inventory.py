@@ -67,6 +67,7 @@ from app.services.owned_property_service import (
     ownership_match_clauses,
     resolve_owner,
 )
+from app.services.receiving_commands import blank_to_none, merge_traceability_into_row
 
 logger = logging.getLogger(__name__)
 
@@ -730,11 +731,20 @@ def receive_inventory(
     )
 
     old_quantity_on_hand = existing.quantity_on_hand if existing else None
+    # Heat / cert typed on a receive that merges into an existing row: first value wins (a blank
+    # column is filled, as the PO-receipt merge does), and a heat or cert that DIFFERS from the
+    # row's is named on the ledger row and the audit row rather than dropped.
+    trace_old: Dict[str, object] = {}
+    trace_new: Dict[str, object] = {}
+    trace_mismatches: List[str] = []
 
     with atomic_transaction(db):
         if existing:
             existing.quantity_on_hand += receive_in.quantity
             existing.quantity_available = existing.quantity_on_hand - existing.quantity_allocated
+            trace_old, trace_new, trace_mismatches = merge_traceability_into_row(
+                existing, {"heat_lot": receive_in.heat_lot, "cert_number": receive_in.cert_number}
+            )
             inv_item = existing
         else:
             inv_item = InventoryItem(
@@ -771,7 +781,11 @@ def receive_inventory(
             reference_number=receive_in.po_number,
             unit_cost=receive_in.unit_cost,
             total_cost=receive_in.quantity * receive_in.unit_cost,
-            notes=receive_in.notes,
+            notes=(
+                "; ".join([n for n in [blank_to_none(receive_in.notes)] if n] + trace_mismatches)
+                if trace_mismatches
+                else receive_in.notes
+            ),
             created_by=current_user.id,
         )
         db.add(txn)
@@ -813,9 +827,10 @@ def receive_inventory(
                 "inventory",
                 inv_item.id,
                 f"{part.part_number} @ {receive_in.location_code}",
-                old_values={"quantity_on_hand": old_quantity_on_hand},
-                new_values={"quantity_on_hand": inv_item.quantity_on_hand},
-                description=f"Receive: stock for part {part.part_number} at {receive_in.location_code}",
+                old_values={"quantity_on_hand": old_quantity_on_hand, **trace_old},
+                new_values={"quantity_on_hand": inv_item.quantity_on_hand, **trace_new},
+                description=f"Receive: stock for part {part.part_number} at {receive_in.location_code}"
+                + "".join(f"; {note}" for note in trace_mismatches),
             )
 
     return {"message": "Inventory received", "inventory_item_id": inv_item.id, "quantity": receive_in.quantity}
@@ -945,7 +960,8 @@ def transfer_inventory(
     Ownership travels with the material: the destination row is matched on the source
     row's owner as well as its lot (customer-owned stock never lands in a company row at
     the destination, nor the reverse), and a newly created destination row carries the
-    source's ownership.
+    source's ownership. It carries the source's heat, cert, PO number and supplier too;
+    an existing destination row keeps its own.
     """
     # FOR UPDATE (no-op on SQLite): both the source decrement and the destination
     # increment below are read-modify-writes racing the consumption engine.
@@ -1019,6 +1035,13 @@ def transfer_inventory(
                 serial_number=inv_item.serial_number,
                 unit_cost=inv_item.unit_cost,
                 received_date=inv_item.received_date,
+                # Traceability travels with the material, as the SKU combine carries it
+                # (inventory_combine_service): a move to a new bin must not strip the heat,
+                # cert, PO and supplier the source row recorded.
+                cert_number=inv_item.cert_number,
+                heat_lot=inv_item.heat_lot,
+                supplier_id=inv_item.supplier_id,
+                po_number=inv_item.po_number,
                 ownership=source_owner[0],
                 owner_customer_id=source_owner[1],
                 owner_vendor_id=source_owner[2],

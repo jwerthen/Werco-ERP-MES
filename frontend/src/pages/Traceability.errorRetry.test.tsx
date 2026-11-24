@@ -17,6 +17,10 @@ jest.mock('../services/api', () => ({
   },
 }));
 
+jest.mock('../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 1, role: 'quality', is_superuser: false } }),
+}));
+
 const mockedApi = api as jest.Mocked<typeof api>;
 
 const http = (status: number, detail: string) => {
