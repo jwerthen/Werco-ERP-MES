@@ -80,3 +80,23 @@ def test_issue_refused_409_before_ship(client: TestClient, db_session: Session):
     assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
     assert "has shipped" in resp.json()["detail"]
     assert _coc_rows(db_session, shipment.id) == []
+
+
+def test_detail_carries_order_facts_for_the_packing_slip(client: TestClient, db_session: Session):
+    user = make_user(db_session)
+    part = make_part(db_session)
+    wo = make_wo(db_session, part, serial_numbers='["SN-1", "SN-2"]')
+    wo.po_line_item = "3"
+    wo.unit_number = "U-12"
+    shipment = make_shipment(db_session, wo)
+    shipment.ship_to_city = "Springfield"
+    shipment.ship_to_state = "IL"
+    shipment.ship_to_zip = "62701"
+    db_session.commit()
+
+    detail = client.get(f"/api/v1/shipping/{shipment.id}", headers=headers_for(user)).json()
+    assert detail["po_line_item"] == "3"
+    assert detail["unit_number"] == "U-12"
+    assert detail["part_revision"] == part.revision
+    assert detail["serial_numbers"] == ["SN-1", "SN-2"]
+    assert (detail["ship_to_city"], detail["ship_to_state"], detail["ship_to_zip"]) == ("Springfield", "IL", "62701")

@@ -59,6 +59,7 @@ from app.services.completion_inventory_service import (
 )
 from app.services.completion_signal_service import enqueue_work_order_completion_signals
 from app.services.operational_event_service import OperationalEventService
+from app.services.process_sheet_service import parse_serial_numbers
 from app.services.shipment_commands import (
     _allocated_quantity,
     create_shipment_command,
@@ -245,6 +246,8 @@ def get_shipment(
         raise HTTPException(status_code=404, detail="Shipment not found")
 
     coc = cocs_by_shipment(db, company_id, [shipment.id]).get(shipment.id)
+    wo = shipment.work_order
+    part = wo.part if wo else None
     return {
         "id": shipment.id,
         "shipment_number": shipment.shipment_number,
@@ -260,6 +263,14 @@ def get_shipment(
         "status": shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
         "ship_to_name": shipment.ship_to_name,
         "ship_to_address": shipment.ship_to_address,
+        "ship_to_city": shipment.ship_to_city,
+        "ship_to_state": shipment.ship_to_state,
+        "ship_to_zip": shipment.ship_to_zip,
+        # Order facts the packing slip prints (shipping/1 step 2).
+        "po_line_item": wo.po_line_item if wo else None,
+        "unit_number": wo.unit_number if wo else None,
+        "part_revision": part.revision if part else None,
+        "serial_numbers": parse_serial_numbers(wo.serial_numbers) if wo else [],
         "carrier": shipment.carrier,
         "tracking_number": shipment.tracking_number,
         "quantity_shipped": shipment.quantity_shipped,
