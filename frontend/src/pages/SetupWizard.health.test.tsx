@@ -59,3 +59,59 @@ it('shows the document storage backend from setup health', async () => {
   expect(screen.getByText('Local disk')).toBeInTheDocument();
   expect(screen.getByText(/lost on the next redeploy/)).toBeInTheDocument();
 });
+it('tells an older API apart from a storage read failure', async () => {
+  (api.getSetupHealth as jest.Mock).mockResolvedValue({ progress: 100, counts: {}, steps: [], issues: [] });
+  render(
+    <MemoryRouter>
+      <SetupWizard />
+    </MemoryRouter>
+  );
+  expect(await screen.findByText(/does not report its storage configuration/)).toBeInTheDocument();
+  expect(screen.queryByText('Storage configuration unavailable.')).not.toBeInTheDocument();
+});
+it('shows storage unavailable when the server sends null', async () => {
+  (api.getSetupHealth as jest.Mock).mockResolvedValue({
+    progress: 100,
+    counts: {},
+    steps: [],
+    issues: [],
+    storage: null,
+  });
+  render(
+    <MemoryRouter>
+      <SetupWizard />
+    </MemoryRouter>
+  );
+  expect(await screen.findByText('Storage configuration unavailable.')).toBeInTheDocument();
+});
+it('withdraws the storage summary after a refresh fails', async () => {
+  (api.getSetupHealth as jest.Mock)
+    .mockResolvedValueOnce({
+      progress: 100,
+      counts: {},
+      steps: [],
+      issues: [],
+      storage: {
+        backend: 's3',
+        durability: 'durable',
+        bucket: 'example-docs',
+        endpoint_host: 'storage.example.test',
+        region: 'us-east-1',
+        upload_dir_configured: null,
+        upload_dir_exists: null,
+        upload_dir_on_mounted_volume: null,
+        warning: null,
+      },
+    })
+    .mockRejectedValue(new Error('offline'));
+  render(
+    <MemoryRouter>
+      <SetupWizard />
+    </MemoryRouter>
+  );
+  expect(await screen.findByText('Object storage')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(await screen.findByText(/Current storage configuration is unknown/)).toBeInTheDocument();
+  expect(screen.queryByText('Object storage')).not.toBeInTheDocument();
+  expect(screen.queryByText('example-docs @ storage.example.test')).not.toBeInTheDocument();
+});

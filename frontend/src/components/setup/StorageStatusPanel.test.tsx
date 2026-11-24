@@ -87,4 +87,35 @@ describe('StorageStatusPanel', () => {
     expect(screen.getByText(/Current storage configuration is unknown/)).toBeInTheDocument();
     expect(screen.queryByText('Object storage')).not.toBeInTheDocument();
   });
+
+  it('shows the region on its own row only beside a custom endpoint host', () => {
+    const { rerender } = render(<StorageStatusPanel storage={s3} />);
+    expect(screen.getByText('Region')).toBeInTheDocument();
+    expect(screen.getByText('us-east-1')).toBeInTheDocument();
+    rerender(<StorageStatusPanel storage={{ ...s3, endpoint_host: null }} />);
+    expect(screen.queryByText('Region')).not.toBeInTheDocument();
+  });
+
+  it('shows the endpoint host alone when no bucket is reported', () => {
+    render(<StorageStatusPanel storage={{ ...s3, bucket: null }} />);
+    expect(screen.getByText('storage.example.test')).toBeInTheDocument();
+    expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+  });
+
+  it('says when the upload folder does not exist yet', () => {
+    render(<StorageStatusPanel storage={local({ upload_dir_exists: false })} />);
+    expect(screen.getByText('Set explicitly, does not exist yet')).toBeInTheDocument();
+  });
+
+  it('renders no warning notice when the server sends none', () => {
+    const { container } = render(<StorageStatusPanel storage={local()} />);
+    expect(container.querySelector('.text-red-200, .text-amber-200')).toBeNull();
+  });
+
+  it('is a labelled region that carries the durability badge and the restore caveat', () => {
+    render(<StorageStatusPanel storage={local({ durability: 'ephemeral', warning: 'Lost on redeploy.' })} />);
+    expect(screen.getByRole('region', { name: 'Document Storage' })).toBeInTheDocument();
+    expect(screen.getByText('ephemeral')).toBeInTheDocument();
+    expect(screen.getByText(/database restore does not bring uploaded files back/)).toBeInTheDocument();
+  });
 });
