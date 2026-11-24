@@ -3127,6 +3127,12 @@ company-scoped.
 >   it is written through `log_required` inside `required_audit`, and if it cannot be written the
 >   request answers **503** and no work order is created. Every other create keeps the best-effort
 >   `log_create`, and the routed path's audit row is unchanged.
+> - **A linked row keeps its step's inspection plan.** An unset `inspection_type` takes the routed
+>   path's value (`"final"` for an inspection operation), so inspection sign-off opens at the planned
+>   type; a supplied `inspection_type` stands. A routing inspection point sent with
+>   `requires_inspection: false` is allowed but named under `dropped_inspection_points` (the
+>   `removed_process_sheet_steps` shape plus `work_order_operation_sequence`), and a non-empty list
+>   makes the creation row required evidence exactly as above (503, nothing created).
 > - `auto_routing: false` with no `operations` is an empty job by request; no link check runs and no
 >   supplied-path keys are written.
 >
@@ -14584,7 +14590,7 @@ table and no environment variable.
 | GET | `/admin/settings/role-permissions/{role}` | One role's effective permissions and `is_customized` | Admin |
 | PUT | `/admin/settings/role-permissions/{role}` | Replace a role's permissions with a company override (body: JSON array of permission keys). **400** on an unknown role or permission; **503** if its required audit row cannot be written (see note) | Admin |
 | POST | `/admin/settings/role-permissions/{role}/reset` | Drop the company override so the role reverts to its defaults; a role with no override is a no-op. **503** as above | Admin |
-| GET | `/admin/system-health` | Read-only System Health: worker alive (heartbeat age), every cron job with armed / off (`null` = unknown), schedule in shop time (America/Chicago), next run, last run and result (`success` / `failed` / `running` -- `running` long after its start means the run was cut off), plus the active company's un-notified event backlog, queued digest items and failed emails (7 days). Writes nothing; Redis unavailable reads as `unknown`, never an error. Crons are armed only by the worker's `WORKER_CRON_JOBS` | Admin |
+| GET | `/admin/system-health` | Read-only System Health: worker alive (heartbeat age), every cron job with armed / off (`null` = unknown), schedule in shop time (America/Chicago), next run, last run and result (`success` / `failed` / `running` -- `running` long after its start means the run was cut off), plus the active company's un-notified event backlog, queued digest items and failed emails (7 days). A cron's last-run outcome and timing are install-wide; its `counts` (what the job returned, summed over every company) are returned only to a platform administrator and are `{}` for a tenant Admin. Writes nothing; Redis unavailable reads as `unknown`, never an error. Crons are armed only by the worker's `WORKER_CRON_JOBS` | Admin |
 
 > **Settings-audit tenancy:** `GET /admin/settings/audit-log` reads the `SettingsAuditLog` trail
 > (admin / quote-config changes) and is **scoped to the caller's active company**
@@ -17221,7 +17227,7 @@ response is still 200.
 |-------|---------|
 | `backend` | `local` or `s3` (`STORAGE_BACKEND`) |
 | `durability` | `durable` (s3), `volume` (local, the upload path or a directory above it other than `/` is a mount point), `ephemeral` (local, no mount found: lost on redeploy), `unknown` (local, mount state unreadable) |
-| `bucket`, `endpoint_host`, `region` | s3 only, and **always `null` on this unauthenticated route** — the document store's address is served only on `GET /api/v1/setup/health`. `endpoint_host` is the hostname of `S3_ENDPOINT_URL` alone (no scheme, port, path or credentials); `null` there means the AWS default endpoint, and `"(unparseable endpoint)"` means one is set but has no parseable hostname |
+| `bucket`, `endpoint_host`, `region` | s3 only, and **always `null` on this unauthenticated route** — the document store's address is served only on `GET /api/v1/setup/health`, and only to an interactive Admin. `endpoint_host` is the hostname of `S3_ENDPOINT_URL` alone (no scheme, port, path or credentials); `null` there means the AWS default endpoint, and `"(unparseable endpoint)"` means one is set but has no parseable hostname |
 | `upload_dir_configured` | local only: `UPLOAD_DIR` was set to a non-empty value. A set-but-empty `UPLOAD_DIR` is described by its fallback, `UPLOAD_DIR_FALLBACK` |
 | `upload_dir_exists`, `upload_dir_on_mounted_volume` | local only; the second is `null` when the mount state cannot be read |
 | `warning` | A fixed advisory text for `ephemeral` and `unknown`, else `null` |
@@ -17231,8 +17237,10 @@ counts), not that the volume survives a redeploy. No credential, full URL or fil
 is ever returned. The worker reads its own environment and is not described.
 
 **Setup Wizard health.** `GET /api/v1/setup/health` (any signed-in user, company-scoped, as
-before) adds `storage`: the same object, **with** `bucket`, `endpoint_host` and `region` filled
-in for s3. It is `null` only when the configuration could not be read; the rest of the
+before) adds `storage`: the same object. `bucket`, `endpoint_host` and `region` are filled in
+for s3 **only for an Admin (or platform administrator) signed in to the app in their own session**;
+every other role and every API token (full or read-only) gets them `null`, exactly as on
+`/health/detailed`, because they address the store every tenant's documents live in. It is `null` only when the configuration could not be read; the rest of the
 response is unaffected. The Setup Wizard renders it as the **Document Storage** panel. See
 [DATABASE_BACKUP.md → Uploaded documents](DATABASE_BACKUP.md#uploaded-documents).
 
