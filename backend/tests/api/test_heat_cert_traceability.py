@@ -426,3 +426,368 @@ def test_search_does_not_return_another_companys_receipt(client: TestClient, db_
 
     results = client.get("/api/v1/traceability/search", params={"q": heat}, headers=headers_for(admin)).json()
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Test-engineer additions: the delivery path, refusals, purity, tenancy, edges
+# ---------------------------------------------------------------------------
+
+
+def _audit_count(db: Session) -> int:
+    db.expire_all()
+    return db.query(AuditLog).count()
+
+
+def _receive_manual(client: TestClient, user, part_id: int, location_code: str, lot: str, **extra):
+    resp = client.post(
+        "/api/v1/inventory/receive",
+        headers=headers_for(user),
+        json={"part_id": part_id, "quantity": 10, "location_code": location_code, "lot_number": lot, **extra},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()
+
+
+def test_delivery_stamps_heat_cert_and_supplier_on_its_dock_to_stock_line(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """POST /receiving/deliveries is the fourth door onto the dock-to-stock path."""
+    monkeypatch.setattr("app.api.endpoints.receiving.enqueue_job_best_effort", lambda *a, **k: None)
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    resp = client.post(
+        "/api/v1/receiving/deliveries",
+        headers=headers_for(admin),
+        json={
+            "idempotency_key": f"heat-delivery-{_next():05d}",
+            "purchase_order_id": line.purchase_order_id,
+            "lines": [
+                {
+                    "po_line_id": line.id,
+                    "quantity_received": 3,
+                    "lot_number": lot,
+                    "heat_number": " H-DLV ",
+                    "cert_number": "MC-DLV",
+                }
+            ],
+        },
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert (row.heat_lot, row.cert_number, row.supplier_id) == ("H-DLV", "MC-DLV", line.purchase_order.vendor_id)
+
+
+def test_merge_fills_a_whitespace_only_value_on_the_existing_row(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=20)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive(client, admin, line, lot=lot)
+    (row,) = _stock_rows(db_session, lot)
+    row.heat_lot = "   "
+    db_session.commit()
+
+    _receive(client, admin, line, lot=lot, heat="H-REAL")
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-REAL"
+
+
+def test_correct_refused_for_operator_leaves_receipt_row_and_audit_untouched(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    operator = make_user(db_session, role=UserRole.OPERATOR, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat="H-KEEP")
+    before = _audit_count(db_session)
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(operator),
+        json={"quantity_received": 5, "heat_number": "H-OPERATOR", "reason": "Not my call."},
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-KEEP"
+    assert db_session.get(POReceipt, receipt["id"]).heat_number == "H-KEEP"
+    assert _audit_count(db_session) == before
+
+
+def test_correct_another_companys_receipt_is_404_with_no_change_and_no_audit(client: TestClient, db_session: Session):
+    owner = make_user(db_session, role=UserRole.ADMIN, company_id=2)
+    intruder = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=2)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, owner, line, lot=lot, heat="H-THEIRS")
+    before = _audit_count(db_session)
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(intruder),
+        json={"quantity_received": 5, "heat_number": "H-MINE", "reason": "Cross-tenant attempt."},
+    )
+    assert resp.status_code == status.HTTP_404_NOT_FOUND, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-THEIRS"
+    assert db_session.get(POReceipt, receipt["id"]).heat_number == "H-THEIRS"
+    assert _audit_count(db_session) == before
+
+
+def test_correct_quantity_only_writes_no_traceability_audit_row(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat="H-SAME")
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 4, "heat_number": "H-SAME", "reason": "Counted again."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert float(row.quantity_on_hand) == 4
+    assert row.heat_lot == "H-SAME"
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.description.like(f"Traceability corrected from receipt {receipt['receipt_number']}%"))
+        .count()
+        == 0
+    )
+
+
+def test_correct_keeps_a_stock_row_value_that_was_changed_on_its_own(client: TestClient, db_session: Session):
+    """The row follows only while it still holds the receipt's OLD value; a value someone
+    set on the row itself is not the receipt's to overwrite."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat="H-A")
+    (row,) = _stock_rows(db_session, lot)
+    row.heat_lot = "H-ROW"
+    db_session.commit()
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 5, "heat_number": "H-B", "reason": "Receipt heat corrected."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-ROW"
+    assert db_session.get(POReceipt, receipt["id"]).heat_number == "H-B"
+
+
+def test_correct_does_not_rewrite_a_row_a_manual_receive_also_fed(client: TestClient, db_session: Session):
+    """A manual /inventory/receive into the same row is another RECEIVE: the row is shared."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    loc = make_location(db_session, company_id=1)
+    resp = client.post(
+        "/api/v1/receiving/receive",
+        headers=headers_for(admin),
+        json={
+            "po_line_id": line.id,
+            "quantity_received": 5,
+            "lot_number": lot,
+            "heat_number": "H-ONE",
+            "requires_inspection": False,
+            "location_id": loc.id,
+        },
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    receipt = resp.json()
+    (row,) = _stock_rows(db_session, lot)
+    assert row.location == loc.code
+    _receive_manual(client, admin, row.part_id, loc.code, lot)
+    (row,) = _stock_rows(db_session, lot)
+    assert float(row.quantity_on_hand) == 15
+
+    resp = client.patch(
+        f"/api/v1/receiving/receipt/{receipt['id']}",
+        headers=headers_for(admin),
+        json={"quantity_received": 5, "heat_number": "H-TWO", "reason": "Receipt heat corrected."},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    (row,) = _stock_rows(db_session, lot)
+    assert row.heat_lot == "H-ONE"
+
+
+def test_transfer_into_an_existing_destination_row_keeps_its_own_heat(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    src = make_location(db_session, company_id=1)
+    dst = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, admin, line.part_id, src.code, lot, heat_lot="H-SRC", cert_number="MC-SRC")
+    _receive_manual(client, admin, line.part_id, dst.code, lot, heat_lot="H-DST", cert_number="MC-DST")
+    source = next(r for r in _stock_rows(db_session, lot) if r.location == src.code)
+
+    resp = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers_for(admin),
+        json={"inventory_item_id": source.id, "quantity": 4, "to_location_code": dst.code},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    dest = next(r for r in _stock_rows(db_session, lot) if r.location == dst.code)
+    assert float(dest.quantity_on_hand) == 14
+    assert (dest.heat_lot, dest.cert_number) == ("H-DST", "MC-DST")
+
+
+def test_transfer_refused_for_operator_creates_no_destination_row(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    operator = make_user(db_session, role=UserRole.OPERATOR, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    src = make_location(db_session, company_id=1)
+    dst = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, admin, line.part_id, src.code, lot, heat_lot="H-SRC")
+    (source,) = _stock_rows(db_session, lot)
+
+    resp = client.post(
+        "/api/v1/inventory/transfer",
+        headers=headers_for(operator),
+        json={"inventory_item_id": source.id, "quantity": 4, "to_location_code": dst.code},
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
+    assert len(_stock_rows(db_session, lot)) == 1
+
+
+def test_trace_and_search_are_pure_reads(client: TestClient, db_session: Session):
+    """The receipt fallback reads the receipt; it never back-fills the stock row."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    heat = f"HEATP{_next():05d}"
+    _receive(client, admin, line, lot=lot, heat=heat, cert="MC-PURE")
+    (row,) = _stock_rows(db_session, lot)
+    row.heat_lot = None
+    row.cert_number = None
+    row.supplier_id = None
+    db_session.commit()
+    before = _audit_count(db_session)
+
+    assert client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(admin)).json()["heat_lot"] == heat
+    assert client.get("/api/v1/traceability/search", params={"q": heat}, headers=headers_for(admin)).json()
+
+    (row,) = _stock_rows(db_session, lot)
+    assert (row.heat_lot, row.cert_number, row.supplier_id) == (None, None, None)
+    assert _audit_count(db_session) == before
+
+
+def test_trace_never_falls_back_to_another_companys_receipt_of_the_same_lot(client: TestClient, db_session: Session):
+    mine = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    theirs = make_user(db_session, role=UserRole.ADMIN, company_id=2)
+    my_line = make_po_line(db_session, company_id=1)
+    their_line = make_po_line(db_session, company_id=2)
+    loc = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, mine, my_line.part_id, loc.code, lot)
+    _receive(client, theirs, their_line, lot=lot, heat="H-FOREIGN", cert="MC-FOREIGN")
+    receipt = db_session.query(POReceipt).filter(POReceipt.lot_number == lot).one()
+    receipt.certificate_document_id = 9191
+    db_session.commit()
+
+    body = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(mine)).json()
+    assert body["part_id"] == my_line.part_id
+    assert body["heat_lot"] is None
+    assert body["cert_number"] is None
+    assert body["certificate_document_id"] is None
+    assert body["supplier_name"] is None
+    assert not [h for h in body["history"] if h["event_type"] == "received"]
+
+
+def test_trace_of_another_companys_held_lot_names_nothing(client: TestClient, db_session: Session):
+    mine = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    theirs = make_user(db_session, role=UserRole.ADMIN, company_id=2)
+    their_line = make_po_line(db_session, company_id=2)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive(client, theirs, their_line, lot=lot, heat="H-FOREIGN-HELD", requires_inspection=True)
+
+    resp = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(mine))
+    if resp.status_code == status.HTTP_200_OK:
+        body = resp.json()
+        assert body["part_id"] is None
+        assert body["heat_lot"] is None
+        assert body["po_number"] is None
+    else:
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_trace_of_a_held_lot_shared_by_two_parts_names_neither(client: TestClient, db_session: Session):
+    """No stock row names the part and the receipts disagree, so none speaks for the header."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive(client, admin, make_po_line(db_session, company_id=1), lot=lot, heat="H-P1", requires_inspection=True)
+    _receive(client, admin, make_po_line(db_session, company_id=1), lot=lot, heat="H-P2", requires_inspection=True)
+
+    body = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(admin)).json()
+    assert body["part_id"] is None
+    assert body["heat_lot"] is None
+    assert len([h for h in body["history"] if h["event_type"] == "received"]) == 2
+
+
+def test_trace_earliest_receipt_wins_among_receipts(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1, quantity_ordered=20)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive(client, admin, line, lot=lot, heat="H-EARLY", requires_inspection=True)
+    _receive(client, admin, line, lot=lot, heat="H-LATER", requires_inspection=True)
+
+    body = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(admin)).json()
+    assert body["heat_lot"] == "H-EARLY"
+
+
+def test_trace_supplier_from_stock_row_reads_through_soft_delete_but_not_across_tenants(
+    client: TestClient, db_session: Session
+):
+    """A manually received lot has no receipt: its supplier comes from the row's supplier_id,
+    read through a soft-deleted vendor, and never from another company's vendor row."""
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    foreign_line = make_po_line(db_session, company_id=2)
+    loc = make_location(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    _receive_manual(client, admin, line.part_id, loc.code, lot)
+    (row,) = _stock_rows(db_session, lot)
+    vendor = line.purchase_order.vendor
+    vendor_name = vendor.name
+    row.supplier_id = vendor.id
+    vendor.soft_delete(admin.id)
+    db_session.commit()
+
+    body = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(admin)).json()
+    assert body["supplier_name"] == vendor_name
+
+    (row,) = _stock_rows(db_session, lot)
+    row.supplier_id = foreign_line.purchase_order.vendor_id
+    db_session.commit()
+    body = client.get(f"/api/v1/traceability/lot/{lot}", headers=headers_for(admin)).json()
+    assert body["supplier_name"] is None
+
+
+def test_search_ignores_a_voided_receipt(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOT-HT-{_next():05d}"
+    heat = f"HEATV{_next():05d}"
+    receipt = _receive(client, admin, line, lot=lot, heat=heat, requires_inspection=True)
+    resp = client.post(
+        f"/api/v1/receiving/receipt/{receipt['id']}/void", headers=headers_for(admin), json={"reason": "Wrong PO."}
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+
+    results = client.get("/api/v1/traceability/search", params={"q": heat}, headers=headers_for(admin)).json()
+    assert results == []
+
+
+def test_search_lists_a_lot_once_when_both_the_row_and_its_receipt_match(client: TestClient, db_session: Session):
+    admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
+    line = make_po_line(db_session, company_id=1)
+    lot = f"LOTDUP{_next():05d}"
+    _receive(client, admin, line, lot=lot, heat="H-DUP")
+
+    results = client.get("/api/v1/traceability/search", params={"q": lot}, headers=headers_for(admin)).json()
+    hits = [r for r in results if r["number"] == lot]
+    assert len(hits) == 1
+    assert (hits[0]["heat_lot"], float(hits[0]["quantity"])) == ("H-DUP", 5)

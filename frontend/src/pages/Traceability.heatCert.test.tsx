@@ -145,3 +145,37 @@ test('search results name the heat and cert so a heat search can be told apart',
   expect(within(held).getByText('Qty: 0')).toBeInTheDocument();
   expect(mockedApi.traceLot).not.toHaveBeenCalled();
 });
+
+test('a received event with no heat or cert on its receipt adds no heat/cert line', async () => {
+  const trace = lotTrace({ heat_lot: null, cert_number: null });
+  trace.history[0].details = { heat_number: '  ', cert_number: null, certificate_document_id: null };
+  mockedApi.traceLot.mockResolvedValue(trace);
+  renderAt('/traceability?number=LOT-H1&type=lot');
+
+  expect(await screen.findByRole('heading', { name: 'Lot: LOT-H1' })).toBeInTheDocument();
+  // The timeline event renders its description, and nothing for a blank heat / cert.
+  expect(screen.getByText('Received from PO PO-1001')).toBeInTheDocument();
+  const heatCertLine = screen.queryAllByText(
+    (_, el) => el?.tagName === 'P' && /^(Heat|Cert) /.test(el.textContent ?? '')
+  );
+  expect(heatCertLine).toHaveLength(0);
+});
+
+test('a serial trace carries no certificate file and calls the serial endpoint', async () => {
+  mockedApi.traceSerial.mockResolvedValue({
+    serial_number: 'SN-1',
+    part_number: 'PN-700',
+    lot_number: 'LOT-H1',
+    status: 'available',
+    cert_number: 'MTR-55',
+    work_orders_used: [],
+    ncrs: [],
+    history: [],
+  });
+  renderAt('/traceability?number=SN-1&type=serial');
+
+  expect(await screen.findByRole('heading', { name: 'Serial: SN-1' })).toBeInTheDocument();
+  expect(mockedApi.traceSerial).toHaveBeenCalledWith('SN-1');
+  expect(mockedApi.traceLot).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Download certificate' })).not.toBeInTheDocument();
+});

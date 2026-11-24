@@ -277,6 +277,14 @@ it('sends heat and cert trimmed on a manual receive, and omits them when blank',
   expect(second.cert_number).toBeUndefined();
 });
 
+it('caps heat and cert at the column width and tells the user a merge keeps the lot’s own values', async () => {
+  mount();
+  const dialog = await openReceive();
+  expect(within(dialog).getByRole('textbox', { name: /^Heat/ })).toHaveAttribute('maxLength', '100');
+  expect(within(dialog).getByRole('textbox', { name: /^Cert/ })).toHaveAttribute('maxLength', '100');
+  expect(within(dialog).getByText(/keeps\s+that record.s own heat and cert/)).toBeInTheDocument();
+});
+
 it('shows each stock row’s heat in the detail table', async () => {
   mockedApi.getInventory.mockResolvedValue([
     { ...stock[0], heat_lot: 'H-9931', cert_number: 'MTR-55' },
