@@ -172,96 +172,122 @@ async def dispatch_notification_direct_task(
 # ---------------------------------------------------------------------------
 
 
+CALIBRATION_DUE_EVENT = "calibration.due"
+CALIBRATION_OVERDUE_EVENT = "calibration.overdue"
+CALIBRATION_DUE_WINDOW_DAYS = 7
+
+
+def calibration_alert_recipients(db, company_id: int) -> list:
+    """Who hears about due and overdue gauges: the catalog entry's audience -- the Quality ROLE
+    plus the Quality department -- not only users whose free-text Department reads "Quality"."""
+    from app.services.notification_dispatch import catalog_audience_for
+
+    return catalog_audience_for(db, CALIBRATION_DUE_EVENT, company_id)
+
+
 async def check_calibrations_task():
-    """Check for calibrations due soon and notify Quality (per tenant)."""
+    """Alert Quality about gauges coming due and gauges already overdue, per tenant, on the
+    company's own calendar day (``company_today``).
+
+    In service means ``is_active`` and a status other than out-of-service / retired (both are
+    deliberate states a person set; the stored ACTIVE / DUE / OVERDUE status is a date-derived
+    label that may be stale, so the date decides). Per gauge, at most one alert a run:
+
+    * ``calibration.overdue`` -- next calibration date before today. Recurring: one unread inbox
+      row per person while it stays overdue, re-raised once read.
+    * ``calibration.due`` -- due today or within the next 7 days; "URGENT" when due today or
+      tomorrow. A gauge due today used to fall through both passes (each required a date after
+      today), and one overdue gauge was never mentioned again.
+    """
     db = SessionLocal()
     try:
         from app.models.calibration import CalibrationStatus, Equipment
+        from app.services.company_time import company_today
 
-        today = datetime.utcnow().date()
-        due_7day = today + timedelta(days=7)
-        due_1day = today + timedelta(days=1)
-
-        total_7day = 0
-        total_1day = 0
+        in_service = (CalibrationStatus.ACTIVE, CalibrationStatus.DUE, CalibrationStatus.OVERDUE)
+        totals = {"calibrations_due": 0, "calibrations_overdue": 0}
 
         for cid in _active_company_ids(db):
             try:
-                calibrations_7day = (
+                today = company_today(db, cid)
+                gauges = (
                     db.query(Equipment)
                     .filter(
                         Equipment.company_id == cid,
-                        Equipment.next_calibration_date <= due_7day,
-                        Equipment.next_calibration_date > today,
-                        Equipment.status == CalibrationStatus.ACTIVE,
+                        Equipment.is_active.is_(True),
+                        Equipment.status.in_(in_service),
+                        Equipment.next_calibration_date.isnot(None),
+                        Equipment.next_calibration_date <= today + timedelta(days=CALIBRATION_DUE_WINDOW_DAYS),
                     )
+                    .order_by(Equipment.next_calibration_date, Equipment.id)
                     .all()
                 )
-                calibrations_1day = (
-                    db.query(Equipment)
-                    .filter(
-                        Equipment.company_id == cid,
-                        Equipment.next_calibration_date <= due_1day,
-                        Equipment.next_calibration_date > today,
-                        Equipment.status == CalibrationStatus.ACTIVE,
-                    )
-                    .all()
-                )
-
-                if not calibrations_7day and not calibrations_1day:
+                if not gauges:
                     continue
 
-                quality_users = get_notification_recipients(db, department="Quality", company_id=cid)
+                # Dispatched even to an empty audience: dispatch_direct also reaches any people an
+                # Admin added under Email Recipients for the event.
+                recipients = calibration_alert_recipients(db, cid)
 
-                for cal in calibrations_7day:
+                for cal in gauges:
                     days = (cal.next_calibration_date - today).days
+                    if days < 0:
+                        await dispatch_direct(
+                            db,
+                            event_key=CALIBRATION_OVERDUE_EVENT,
+                            company_id=cid,
+                            recipients=recipients,
+                            related_type="Equipment",
+                            related_id=cal.id,
+                            title=f"OVERDUE: Calibration of {cal.name} is {_days_word(-days)} overdue",
+                            body=(
+                                f"Was due {_alert_date(cal.next_calibration_date)}. Take the gauge out of use "
+                                "until it is calibrated."
+                            ),
+                            link=links.CALIBRATION_LIST,
+                            template="calibration_due",
+                            context={
+                                "equipment_name": cal.name,
+                                "days_overdue": -days,
+                                "overdue": True,
+                                "urgent": True,
+                                "link_path": links.CALIBRATION_LIST,
+                            },
+                        )
+                        totals["calibrations_overdue"] += 1
+                        continue
+
+                    urgent = days <= 1
+                    when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {_days_word(days)}"
                     await dispatch_direct(
                         db,
-                        event_key="calibration.due",
+                        event_key=CALIBRATION_DUE_EVENT,
                         company_id=cid,
-                        recipients=quality_users,
+                        recipients=recipients,
                         related_type="Equipment",
                         related_id=cal.id,
-                        title=f"Calibration due soon: {cal.name}",
-                        body=f"Calibration is due in {days} day(s).",
+                        title=f"{'URGENT: ' if urgent else ''}Calibration due {when}: {cal.name}",
+                        body=f"Calibration is due {_alert_date(cal.next_calibration_date)}.",
                         link=links.CALIBRATION_LIST,
                         template="calibration_due",
                         context={
                             "equipment_name": cal.name,
                             "days_until_due": days,
+                            "urgent": urgent,
                             "link_path": links.CALIBRATION_LIST,
                         },
                     )
-
-                for cal in calibrations_1day:
-                    await dispatch_direct(
-                        db,
-                        event_key="calibration.due",
-                        company_id=cid,
-                        recipients=quality_users,
-                        related_type="Equipment",
-                        related_id=cal.id,
-                        title=f"URGENT: Calibration due tomorrow: {cal.name}",
-                        body="Calibration is due within 1 day.",
-                        link=links.CALIBRATION_LIST,
-                        template="calibration_due",
-                        context={
-                            "equipment_name": cal.name,
-                            "days_until_due": 1,
-                            "urgent": True,
-                            "link_path": links.CALIBRATION_LIST,
-                        },
-                    )
-
-                total_7day += len(calibrations_7day)
-                total_1day += len(calibrations_1day)
+                    totals["calibrations_due"] += 1
             except Exception as e:
-                logger.error(f"Calibration digest failed for company {cid}: {e}")
+                logger.error(f"Calibration alerts failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
-                reset_session_after_failure(db, f"the calibration digest for company {cid}")
+                reset_session_after_failure(db, f"the calibration alerts for company {cid}")
 
-        logger.info(f"Checked calibrations: {total_7day} due in 7 days, {total_1day} due tomorrow")
-        return {"calibrations_7day": total_7day, "calibrations_1day": total_1day}
+        logger.info(
+            f"Checked calibrations: {totals['calibrations_overdue']} overdue, {totals['calibrations_due']} due "
+            f"within {CALIBRATION_DUE_WINDOW_DAYS} days"
+        )
+        return totals
 
     except Exception as e:
         logger.error(f"Calibration check job failed: {e}")
@@ -270,68 +296,126 @@ async def check_calibrations_task():
         db.close()
 
 
+LATE_SUMMARY_EVENT = "wo.late"
+LATE_SUMMARY_RELATED_TYPE = "LateWorkOrderSummary"
+LATE_SUMMARY_LIST_LIMIT = 10
+LATE_CRITICAL_DAYS = 7
+
+
+def late_summary_related_id(day) -> int:
+    """The summary's dedupe key: the company-local day as ``YYYYMMDD``. Together with
+    ``LATE_SUMMARY_RELATED_TYPE`` and the recipient it makes one summary per person per day."""
+    return day.year * 10000 + day.month * 100 + day.day
+
+
+def _late_summary_already_sent(db, company_id: int, related_id: int) -> bool:
+    """A summary for this company day already exists (in-app row or email log): a second run of
+    the job the same day sends nothing."""
+    from app.models.notification import Notification, NotificationLog
+
+    for model, key_column in ((Notification, Notification.event_key), (NotificationLog, NotificationLog.event_type)):
+        hit = (
+            db.query(model.id)
+            .filter(
+                model.company_id == company_id,
+                key_column == LATE_SUMMARY_EVENT,
+                model.related_type == LATE_SUMMARY_RELATED_TYPE,
+                model.related_id == related_id,
+            )
+            .first()
+        )
+        if hit is not None:
+            return True
+    return False
+
+
 async def check_late_work_orders_task():
-    """Check for late work orders and notify supervisors/managers (per tenant)."""
+    """One daily late-jobs summary per Supervisor and Manager, per tenant (plan alerts_health/2 step 4).
+
+    Late means past the PROMISE date -- ``must_ship_by`` when set, else ``due_date`` -- against the
+    company's own day (``company_today``), for a released, in-progress or held work order that is
+    not deleted. Replaces the old per-job dispatch (one in-app row and one email per late job to
+    every supervisor and manager, judged on the due date and the UTC day).
+
+    The summary carries the total, the ten most overdue jobs (work order number and days late --
+    no part numbers or customer names, docs/NOTIFICATIONS.md section 11.1) and a link to the Work
+    Orders list's late view (``scope=late``, the same predicate). Recipients are the ``wo.late`` catalog audience (the Supervisor and
+    Manager roles) plus anyone an Admin selected under Email Recipients. Dedupe key: the company
+    day per recipient; a second run the same day sends nothing."""
     db = SessionLocal()
     try:
         from app.models.work_order import WorkOrder
+        from app.services.company_time import company_today
+        from app.services.notification_dispatch import catalog_audience_for
+        from app.services.work_order_browse_service import late_promise_date, late_work_order_clause
 
-        today = datetime.utcnow().date()
         total_late = 0
+        summaries = 0
 
         for cid in _active_company_ids(db):
             try:
-                late_wos = (
-                    db.query(WorkOrder)
-                    .filter(
-                        WorkOrder.company_id == cid,
-                        WorkOrder.is_deleted == False,
-                        WorkOrder.due_date < today,
-                        WorkOrder.status.in_(["RELEASED", "IN_PROGRESS"]),
-                    )
-                    .all()
+                today = company_today(db, cid)
+                promise = late_promise_date()
+                late = db.query(WorkOrder).filter(
+                    WorkOrder.company_id == cid,
+                    WorkOrder.is_deleted == False,  # noqa: E712
+                    late_work_order_clause(today),
                 )
+                count = late.count()
+                if not count:
+                    continue
+                total_late += count
 
-                if not late_wos:
+                related_id = late_summary_related_id(today)
+                if _late_summary_already_sent(db, cid, related_id):
                     continue
 
-                supervisors = get_notification_recipients(db, role="supervisor", company_id=cid)
-                managers = get_notification_recipients(db, role="manager", company_id=cid)
-                recipients = supervisors + managers
-
-                for wo in late_wos:
-                    days_late = (today - wo.due_date).days
-                    is_critical = days_late > 7
-                    await dispatch_direct(
-                        db,
-                        event_key="wo.late",
-                        company_id=cid,
-                        recipients=recipients,
-                        related_type="WorkOrder",
-                        related_id=wo.id,
-                        title=(
-                            f"{'CRITICAL: ' if is_critical else ''}"
-                            f"Work Order {wo.work_order_number} is {days_late} days late"
-                        ),
-                        body="This work order is past its due date.",
-                        link=links.work_order_detail(wo.id),
-                        template="work_order_late",
-                        context={
+                worst = late.order_by(promise.asc(), WorkOrder.work_order_number.asc()).limit(LATE_SUMMARY_LIST_LIMIT)
+                jobs = []
+                for wo in worst.all():
+                    promised = wo.must_ship_by or wo.due_date
+                    days_late = (today - promised).days
+                    jobs.append(
+                        {
                             "work_order_number": wo.work_order_number,
                             "days_late": days_late,
-                            "critical": is_critical,
-                            "link_path": links.work_order_detail(wo.id),
-                        },
+                            "critical": days_late > LATE_CRITICAL_DAYS,
+                        }
                     )
+                more = count - len(jobs)
+                noun = "work order is" if count == 1 else "work orders are"
+                lines = [f"{count} {noun} past the promise date (ship-by date, else due date)."]
+                lines += [f"{job['work_order_number']}: {_days_word(job['days_late'])} late" for job in jobs]
+                if more > 0:
+                    lines.append(f"And {more} more.")
 
-                total_late += len(late_wos)
+                await dispatch_direct(
+                    db,
+                    event_key=LATE_SUMMARY_EVENT,
+                    company_id=cid,
+                    recipients=catalog_audience_for(db, LATE_SUMMARY_EVENT, cid),
+                    related_type=LATE_SUMMARY_RELATED_TYPE,
+                    related_id=related_id,
+                    title=f"Late work orders: {count}",
+                    body="\n".join(lines),
+                    link=links.WORK_ORDERS_LATE,
+                    template="work_order_late",
+                    context={
+                        "total": count,
+                        "jobs": jobs,
+                        "more": more,
+                        "critical": any(job["critical"] for job in jobs),
+                        "link_path": links.WORK_ORDERS_LATE,
+                    },
+                )
+                summaries += 1
             except Exception as e:
-                logger.error(f"Late work order digest failed for company {cid}: {e}")
+                logger.error(f"Late work order summary failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
-                reset_session_after_failure(db, f"the late work order digest for company {cid}")
+                reset_session_after_failure(db, f"the late work order summary for company {cid}")
 
-        logger.info(f"Checked late work orders: {total_late} late")
-        return {"late_work_orders": total_late}
+        logger.info(f"Checked late work orders: {total_late} late, {summaries} summary dispatch(es)")
+        return {"late_work_orders": total_late, "summaries": summaries}
 
     except Exception as e:
         logger.error(f"Late work order check job failed: {e}")
@@ -341,39 +425,37 @@ async def check_late_work_orders_task():
 
 
 async def check_low_stock_task():
-    """Check for low stock items and notify Purchasing/Inventory (per tenant)."""
+    """Tell Purchasing and Inventory how many parts are low, once a day per tenant.
+
+    The count is the one low-stock rule (``low_stock_service``): parts, not stock rows, at or
+    below a reorder point above zero, company-owned stock only -- so it matches the Inventory
+    page's low-stock list, which the alert links to. Recipients are the ``stock.low`` catalog
+    audience. The body names no part (docs/NOTIFICATIONS.md section 11.1): a count, how many are
+    out of stock, and how many are at or below safety stock."""
     db = SessionLocal()
     try:
-        from app.models.inventory import InventoryItem
-        from app.models.part import Part
-        from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
+        from app.services.low_stock_service import low_stock_parts
+        from app.services.notification_dispatch import catalog_audience_for
 
         total_low_stock = 0
 
         for cid in _active_company_ids(db):
             try:
-                low_stock = (
-                    db.query(InventoryItem)
-                    .join(Part, InventoryItem.part_id == Part.id)
-                    .filter(
-                        InventoryItem.company_id == cid,
-                        Part.company_id == cid,
-                        Part.is_deleted == False,
-                        InventoryItem.quantity_on_hand <= Part.reorder_point,
-                        # A customer's or supplier's stock row is not the shop's to reorder
-                        # (AS9100D 8.5.3): only company-owned rows are counted.
-                        *COMPANY_OWNED_ITEM_CLAUSES,
-                    )
-                    .all()
-                )
-
-                if not low_stock:
+                low = low_stock_parts(db, cid)
+                if not low:
                     continue
 
-                purchasing_users = get_notification_recipients(db, department="Purchasing", company_id=cid)
-                inventory_users = get_notification_recipients(db, department="Inventory", company_id=cid)
-                recipients = purchasing_users + inventory_users
+                recipients = catalog_audience_for(db, "stock.low", cid)
 
+                count = len(low)
+                out = sum(1 for row in low if row.out_of_stock)
+                critical = sum(1 for row in low if row.is_critical)
+                noun = "part is" if count == 1 else "parts are"
+                body = f"{count} {noun} at or below the reorder point"
+                if out:
+                    body += f"; {out} out of stock"
+                if critical:
+                    body += f"; {critical} at or below safety stock"
                 await dispatch_direct(
                     db,
                     event_key="stock.low",
@@ -381,20 +463,25 @@ async def check_low_stock_task():
                     recipients=recipients,
                     related_type=None,
                     related_id=None,
-                    title=f"Low Stock Alert: {len(low_stock)} items below reorder point",
-                    body=f"{len(low_stock)} item(s) are at or below their reorder point.",
-                    link=links.INVENTORY_LIST,
+                    title=f"Low stock: {count} {'part' if count == 1 else 'parts'} at or below reorder point",
+                    body=body + ".",
+                    link=links.INVENTORY_LOW_STOCK,
                     template="low_stock",
-                    context={"count": len(low_stock), "link_path": links.INVENTORY_LIST},
+                    context={
+                        "count": count,
+                        "out_of_stock": out,
+                        "critical": critical,
+                        "link_path": links.INVENTORY_LOW_STOCK,
+                    },
                 )
 
-                total_low_stock += len(low_stock)
+                total_low_stock += count
             except Exception as e:
                 logger.error(f"Low stock digest failed for company {cid}: {e}")
                 # Reset the shared session, or every later tenant inherits this one's failed transaction.
                 reset_session_after_failure(db, f"the low stock digest for company {cid}")
 
-        logger.info(f"Low stock check: {total_low_stock} items")
+        logger.info(f"Low stock check: {total_low_stock} parts")
         return {"low_stock_items": total_low_stock}
 
     except Exception as e:
@@ -481,17 +568,9 @@ def maintenance_alert_recipients(db, company_id: int) -> list:
     """Who hears about due and overdue PM: the company's active users in the catalog entry's departments
     (Maintenance) plus its active users in the entry's roles (Admin) -- owner decision 2026-11-20, held in
     ONE place, ``notification_catalog`` -- each once."""
-    from app.services.notification_catalog import get_entry
+    from app.services.notification_dispatch import catalog_audience_for
 
-    entry = get_entry(MAINTENANCE_DUE_EVENT)
-    recipients: dict = {}
-    for department in entry.departments:
-        for user in get_notification_recipients(db, department=department, company_id=company_id):
-            recipients.setdefault(user.id, user)
-    for role in entry.roles:
-        for user in get_notification_recipients(db, role=role, company_id=company_id):
-            recipients.setdefault(user.id, user)
-    return list(recipients.values())
+    return catalog_audience_for(db, MAINTENANCE_DUE_EVENT, company_id)
 
 
 def _alert_date(value) -> str:

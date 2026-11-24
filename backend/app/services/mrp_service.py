@@ -27,7 +27,7 @@ def is_customer_supplied(part) -> bool:
     """THE customer-supplied predicate for planning (owner decision 2026-11-22).
 
     A customer-supplied (customer-furnished) part creates no MRP demand: the BOM explosion
-    skips it, and every door that turns an MRP action into supply -- the auto-draft cron
+    skips it, and every door that turns an MRP action into supply -- an AUTO_DRAFT pass
     (``MRPAutoService.process_actions``) and the reviewed draft / purchase batch
     (``MRPSupplyService.review``) -- refuses it with ``CUSTOMER_SUPPLIED_SUPPLY_DETAIL``. It
     reads the part's own flag only, never stock ownership.

@@ -41,7 +41,7 @@ from app.schemas.notification import (
     NotificationPreferencesUpdate,
     TestSMSResponse,
 )
-from app.schemas.user import validate_password_strength
+from app.schemas.user import UnlistedDepartmentUser, UserDepartmentsResponse, validate_password_strength
 from app.services import api_token_service, comment_service
 from app.services.audit_service import AuditService
 from app.services.hank_preference_service import get_hank_preference_values
@@ -71,6 +71,12 @@ from app.services.sms_service import (
     scrub_phone_numbers,
     send_sms,
     sms_configured,
+)
+from app.services.user_departments import (
+    DEPARTMENTS,
+    canonical_department,
+    department_for_update,
+    is_listed_department,
 )
 from app.services.user_identity import (
     IdentifierDerivationExhausted,
@@ -682,6 +688,45 @@ async def send_test_sms(
     )
 
 
+def _department_or_422(value: Optional[str], current: Optional[str] = None, *, updating: bool = False) -> Optional[str]:
+    """The pick-list spelling of a department (``app.services.user_departments``), or 422 with the list."""
+    try:
+        return department_for_update(value, current) if updating else canonical_department(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/departments", response_model=UserDepartmentsResponse)
+def list_user_departments(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """The fixed Department pick list, and every user of this company (active or not) whose stored
+    Department is not on it -- notifications match departments by exact name, so those users are
+    reached by no department-based alert until an Admin picks one. Admin only. Writes nothing."""
+    users = (
+        db.query(User)
+        .filter(User.company_id == company_id, User.department.isnot(None), User.department != "")
+        .order_by(User.last_name, User.first_name, User.id)
+        .all()
+    )
+    return UserDepartmentsResponse(
+        departments=list(DEPARTMENTS),
+        unlisted=[
+            UnlistedDepartmentUser(
+                id=user.id,
+                name=user.full_name,
+                employee_id=user.employee_id,
+                is_active=bool(user.is_active),
+                department=user.department,
+            )
+            for user in users
+            if not is_listed_department(user.department)
+        ],
+    )
+
+
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(
     user_id: int,
@@ -721,7 +766,7 @@ def create_user(
             last_name=user_in.last_name,
             password=user_in.password,
             role=user_in.role,
-            department=user_in.department,
+            department=_department_or_422(user_in.department),
             phone=_normalized_phone_or_400(user_in.phone),
             created_by=current_user.id,
         )
@@ -786,7 +831,7 @@ async def import_users_csv(
             email = row.get("email", "")
             password = row.get("password", "") or fallback_password
             role_raw = (row.get("role", UserRole.OPERATOR.value) or UserRole.OPERATOR.value).strip().lower()
-            department = row.get("department") or None
+            department_raw = row.get("department") or None
 
             if not employee_id:
                 errors.append(UserCsvImportError(row=row_number, reason="employee_id is required"))
@@ -812,6 +857,14 @@ async def import_users_csv(
                         email=email or None,
                         reason="first_name and last_name are required",
                     )
+                )
+                continue
+
+            try:
+                department = canonical_department(department_raw)
+            except ValueError as exc:
+                errors.append(
+                    UserCsvImportError(row=row_number, employee_id=employee_id, email=email or None, reason=str(exc))
                 )
                 continue
 
@@ -1015,6 +1068,9 @@ def update_user(
     # admin path can't store a number the SMS transport would reject at send time.
     if "phone" in update_data:
         update_data["phone"] = _normalized_phone_or_400(update_data["phone"])
+    # Department is a pick list; re-sending a legacy value unchanged is allowed (user_departments).
+    if "department" in update_data:
+        update_data["department"] = _department_or_422(update_data["department"], user.department, updating=True)
 
     # Check email uniqueness if changing
     if "email" in update_data and update_data["email"] != user.email:
@@ -1069,6 +1125,7 @@ def approve_user(
     ``PUT /users/{user_id}``.
     """
     require_tenant_role(approval.role, "Platform admin role cannot be assigned through approval")
+    approval_department = _department_or_422(approval.department) if approval.department is not None else None
 
     user = db.query(User).filter(User.id == user_id, User.company_id == company_id).first()
     if not user:
@@ -1086,7 +1143,7 @@ def approve_user(
     with atomic_security_write(db):
         user.role = approval.role
         if approval.department is not None:
-            user.department = approval.department
+            user.department = approval_department
         user.is_active = True
         pin_cleared = clear_floor_pin_on_promotion(user, old_values["role"])
 

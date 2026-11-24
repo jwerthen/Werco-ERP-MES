@@ -10,12 +10,12 @@ supply for it. The flag is ``Part.customer_supplied`` and the predicate is
   subassembly is not recursed into, so its own BOM children create nothing either; a
   flagged part deeper in the tree is skipped at that depth. Clearing the flag restores
   demand, which doubles as the positive control that the fixtures DO create demand.
-* **The auto-draft cron.** ``_run_mrp_for_company`` in AUTO_DRAFT (what the 06:00
-  ``run_mrp_auto_draft_job`` drives) drafts nothing for a flagged part while still drafting
-  its sibling. An action minted BEFORE the part was flagged is refused by
+* **An AUTO_DRAFT pass.** ``_run_mrp_for_company`` in AUTO_DRAFT (no longer scheduled: the
+  06:00 cron is REVIEW-only) drafts nothing for a flagged part while still drafting its
+  sibling. An action minted BEFORE the part was flagged is refused by
   ``MRPAutoService.process_actions`` ahead of any supply call -- ORDER never reaches
-  ``_get_preferred_vendor`` (whose first-active-vendor fallback is the trap),
-  MANUFACTURE never reaches ``_create_wo_from_action``, EXPEDITE never reaches
+  ``_get_preferred_vendor``, MANUFACTURE is refused rather than counted as left for review
+  (no automatic pass drafts a work order at all), EXPEDITE never reaches
   ``_flag_for_expedite`` / the ``mrp.expedite_required`` dispatch -- and the refusal text
   lands on ``action.error_message`` and in ``errors``. Each refusal is paired with an
   unflagged sibling that DOES reach the call, so a guard that refused everything fails.
@@ -159,6 +159,22 @@ def _vendor(db: Session, *, company_id: int = COMPANY_A) -> Vendor:
     db.commit()
     db.refresh(vendor)
     return vendor
+
+
+def _map(db: Session, vendor: Vendor, part: Part) -> None:
+    """Source ``part`` from ``vendor``: an AUTO_DRAFT pass drafts only for a part with sourcing."""
+    from app.models.supplier_part import SupplierPartMapping
+
+    db.add(
+        SupplierPartMapping(
+            company_id=vendor.company_id,
+            vendor_id=vendor.id,
+            part_id=part.id,
+            supplier_part_number=f"CSM-SP-{_next()}",
+            is_active=True,
+        )
+    )
+    db.commit()
 
 
 def _run(db: Session, *, include_safety_stock: bool = True) -> MRPRun:
@@ -395,13 +411,14 @@ def _spy(monkeypatch, name: str, *, key) -> List:
     return calls
 
 
-def test_the_auto_draft_cron_drafts_nothing_for_a_flagged_part(db_session: Session, monkeypatch):
-    """What ``run_mrp_auto_draft_job`` runs per company: a fresh run, then AUTO_DRAFT over its
-    actions. An active vendor exists (the first-active-vendor fallback would take it), the
-    sibling gets its draft PO, and the flagged component, the flagged subassembly and that
-    subassembly's child get no PO line, no work order and no action."""
+def test_an_auto_draft_pass_drafts_nothing_for_a_flagged_part(db_session: Session, monkeypatch):
+    """An AUTO_DRAFT pass per company: a fresh run, then AUTO_DRAFT over its actions. The
+    sibling is sourced from an active vendor and gets its draft PO, and the flagged component,
+    the flagged subassembly and that subassembly's child get no PO line, no work order and no
+    action."""
     f = _furnished_assembly(db_session, demand=5)
     vendor = _vendor(db_session)
+    _map(db_session, vendor, f.sibling)
     planner_dispatches = _record_dispatch(monkeypatch, mrp_jobs)
     vendor_lookups = _spy(monkeypatch, "_get_preferred_vendor", key=lambda args: args[0])
 
@@ -411,7 +428,12 @@ def test_the_auto_draft_cron_drafts_nothing_for_a_flagged_part(db_session: Sessi
         )
     )
 
-    assert result["auto_processing"] == {"pos_created": 1, "wos_created": 0, "actions_processed": 1, "errors": 0}
+    assert result["auto_processing"] == {
+        "pos_created": 1,
+        "manufacture_left_for_review": 0,
+        "actions_processed": 1,
+        "errors": 0,
+    }
     assert vendor_lookups == [f.sibling.id]
     assert _po_line_part_ids(db_session) == [f.sibling.id]
     assert db_session.query(PurchaseOrder).one().vendor_id == vendor.id
@@ -429,7 +451,9 @@ def test_an_order_minted_before_the_flag_is_refused_before_a_vendor_is_chosen(db
     _line(db_session, bom, furnished, 2.0, item_number=10)
     _line(db_session, bom, sibling, 1.0, item_number=20)
     make_wo(db_session, assembly, quantity_ordered=5)
-    _vendor(db_session)
+    vendor = _vendor(db_session)
+    _map(db_session, vendor, furnished)
+    _map(db_session, vendor, sibling)
     run = _run(db_session)
     stale = _action_for(db_session, run, furnished)
     control = _action_for(db_session, run, sibling)
@@ -441,7 +465,7 @@ def test_an_order_minted_before_the_flag_is_refused_before_a_vendor_is_chosen(db
 
     results = MRPAutoService(db_session, COMPANY_A).process_actions([stale, control], MRPAutoMode.AUTO_DRAFT)
 
-    assert results == {"pos_created": 1, "wos_created": 0, "actions_processed": 1, "errors": 1}
+    assert results == {"pos_created": 1, "manufacture_left_for_review": 0, "actions_processed": 1, "errors": 1}
     assert vendor_lookups == [sibling.id], "no vendor may be chosen for a customer-supplied part"
     assert po_drafts == [control.id]
     db_session.expire_all()
@@ -452,9 +476,7 @@ def test_an_order_minted_before_the_flag_is_refused_before_a_vendor_is_chosen(db
     assert _po_line_part_ids(db_session) == [sibling.id]
 
 
-def test_a_manufacture_minted_before_the_flag_is_refused_before_a_work_order_is_drafted(
-    db_session: Session, monkeypatch
-):
+def test_a_manufacture_minted_before_the_flag_is_refused_and_no_work_order_is_drafted(db_session: Session, monkeypatch):
     assembly = _part(db_session, part_type="manufactured")
     furnished = _part(db_session, part_type="manufactured")
     sibling = _part(db_session, part_type="manufactured")
@@ -468,22 +490,24 @@ def test_a_manufacture_minted_before_the_flag_is_refused_before_a_work_order_is_
     assert stale.action_type == control.action_type == PlanningAction.MANUFACTURE
 
     _flag(db_session, furnished, True)
-    wo_drafts = _spy(monkeypatch, "_create_wo_from_action", key=lambda args: args[0].id)
 
     refused = MRPAutoService(db_session, COMPANY_A).process_actions([stale], MRPAutoMode.AUTO_DRAFT)
 
-    assert refused == {"pos_created": 0, "wos_created": 0, "actions_processed": 0, "errors": 1}
-    assert wo_drafts == []
+    assert refused == {"pos_created": 0, "manufacture_left_for_review": 0, "actions_processed": 0, "errors": 1}
     db_session.expire_all()
     stale = db_session.get(MRPAction, stale.id)
     assert stale.error_message == REFUSAL
     assert stale.processed is False and stale.result_wo_id is None
     assert db_session.query(WorkOrder).filter(WorkOrder.part_id == furnished.id).count() == 0
 
-    # Positive control: the unflagged sibling's MANUFACTURE does reach the work-order drafter.
-    # Its outcome is deliberately not asserted here (that is the drafter's own contract).
-    MRPAutoService(db_session, COMPANY_A).process_actions([control], MRPAutoMode.AUTO_DRAFT)
-    assert wo_drafts == [control.id]
+    # Positive control: the unflagged sibling's MANUFACTURE is not refused -- it is left for the
+    # planner's review, untouched, and no automatic pass drafts a work order for it either.
+    left = MRPAutoService(db_session, COMPANY_A).process_actions([control], MRPAutoMode.AUTO_DRAFT)
+    assert left == {"pos_created": 0, "manufacture_left_for_review": 1, "actions_processed": 0, "errors": 0}
+    db_session.expire_all()
+    control = db_session.get(MRPAction, control.id)
+    assert control.processed is False and control.result_wo_id is None and control.error_message is None
+    assert db_session.query(WorkOrder).filter(WorkOrder.part_id == sibling.id).count() == 0
 
 
 def test_an_expedite_minted_before_the_flag_sends_no_expedite(db_session: Session, monkeypatch):
@@ -515,7 +539,7 @@ def test_an_expedite_minted_before_the_flag_sends_no_expedite(db_session: Sessio
 
     results = MRPAutoService(db_session, COMPANY_A).process_actions([stale, control], MRPAutoMode.AUTO_DRAFT)
 
-    assert results == {"pos_created": 0, "wos_created": 0, "actions_processed": 1, "errors": 1}
+    assert results == {"pos_created": 0, "manufacture_left_for_review": 0, "actions_processed": 1, "errors": 1}
     assert expedites == [control.id]
     assert [(call["event_key"], call["related_id"]) for call in dispatches] == [("mrp.expedite_required", sibling.id)]
     db_session.expire_all()

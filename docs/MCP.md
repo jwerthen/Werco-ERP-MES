@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **795 tools** — 15 hand-written *convenience* tools plus
-**780 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **796 tools** — 15 hand-written *convenience* tools plus
+**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -120,6 +120,13 @@ credential (§6.1, §4.3). That half was not separately put to the owner and is 
 confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
+
+**Re-checked again on 2026-11-23 after Department became a pick list added one Users tool**,
+`list_user_departments` (`GET /users/departments`, Admin only; no existing name shifted): 15
+convenience + **781** generated, 16 shadowed. It is a read, but it sits under `Users`, which the
+read-only deny list carries, so the read-only catalog is unchanged at 8 convenience + **304**
+generated, and it is not on the AI-external allowlist. See
+[API.md → Users (Admin)](API.md#users-admin).
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -817,7 +824,7 @@ pages are `frontend/src/pages/*.tsx`; routes are from `frontend/src/App.tsx`.
 | `PrintShippingLabel` (`/print/shipping-label/:id`) | Shipping, Documents | `get_shipment`, `download_document` |
 | `PrintBadges` (`/print/badges`) | Users | `list_users` |
 | `ImportCenter` (`/import-center`) | Import Kit, Purchasing, Users, Work Orders | `get_import_templates`, `download_import_template`, `import_users_csv` — the two Excel-cutover loaders (`POST /work-orders/import`, `POST /purchasing/purchase-orders/import`) are deliberately **not** tools (§6.1) |
-| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user` — `list_users` shows each user's floor-PIN state and export authorization; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token; **nor is granting or revoking export authorization** (`PUT /users/{user_id}/export-authorization` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
+| `Users` (`/users`) | Users | `list_users`, `create_user`, `update_user`, `deactivate_user`, `reset_user_password`, `approve_user`, `unlock_user`, `list_user_departments` (the Department pick list and the users whose value is off it) — `list_users` shows each user's floor-PIN state and export authorization; **setting, clearing or unlocking a floor PIN is not a tool**: `PUT` / `DELETE /users/{user_id}/floor-pin` and `POST /users/{user_id}/floor-pin/unlock` are in `EXCLUDED_OPERATIONS` (§6.1) and refuse **403** to every API token; **nor is granting or revoking export authorization** (`PUT /users/{user_id}/export-authorization` is in `EXCLUDED_OPERATIONS`, §6.1, and refuses **403** to every API token) |
 | `AuditLog` (`/audit-log`) | Audit | `list_audit_logs`, `get_audit_summary`, `verify_audit_integrity`, `get_integrity_status` |
 | `VisitorLog` (`/visitor-log`) | Visitor Logs | `list_visitors`, `manual_entry`, `sign_out`, `export_visitors_csv`, `create_station`, `revoke_station` |
 | `VisitorSignIn` (`/visitor-signin`) | Visitor Logs | `sign_in`, `sign_out` (under the caller's own role; the tablet's shared-PIN station login is unauthenticated plumbing and is not a tool) |

@@ -391,9 +391,8 @@ def test_global_search_excludes_soft_deleted_vendor(client: TestClient, db_sessi
 
 
 def test_mrp_preferred_vendor_priority1_supplier_mapping_skips_deleted_vendor(db_session: Session):
-    """Priority 1 picks the supplier for AUTO_DRAFT (the 6 AM cron) and AUTO_SUBMIT POs --
-    the highest-consequence vendor selection in the app, since AUTO_SUBMIT sends with no
-    human in the loop."""
+    """Priority 1 picks the supplier for an AUTO_DRAFT pass's POs -- a vendor selection made
+    with nobody looking (no cron runs it; the 6 AM MRP job is REVIEW-only)."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     part = _make_part(db_session)
     doomed = make_vendor(db_session, company_id=1)
@@ -449,9 +448,11 @@ def test_mrp_preferred_vendor_priority2_po_history_skips_deleted_vendor(db_sessi
     assert service._get_preferred_vendor(live_line.part_id).id == live_line.purchase_order.vendor_id
 
 
-def test_mrp_preferred_vendor_priority3_fallback_skips_deleted_vendor(db_session: Session):
-    """Priority 3 fires for a part with no mapping and no purchase history -- a NEW part,
-    i.e. the draft PO least likely to look wrong to a buyer skimming the queue."""
+def test_mrp_preferred_vendor_has_no_first_active_vendor_fallback(db_session: Session):
+    """A part with no mapping and no purchase history -- a NEW part, the draft PO least likely
+    to look wrong to a buyer skimming the queue -- gets NO supplier: the old priority 3 ("first
+    active vendor") was removed, so neither a reanimated deleted vendor nor a live one is
+    picked for it."""
     admin = make_user(db_session, role=UserRole.ADMIN, company_id=1)
     part = _make_part(db_session)
     doomed = make_vendor(db_session, company_id=1)
@@ -461,8 +462,8 @@ def test_mrp_preferred_vendor_priority3_fallback_skips_deleted_vendor(db_session
     service = MRPAutoService(db_session, company_id=1)
     assert service._get_preferred_vendor(part.id) is None
 
-    live = make_vendor(db_session, company_id=1)
-    assert service._get_preferred_vendor(part.id).id == live.id
+    make_vendor(db_session, company_id=1)
+    assert service._get_preferred_vendor(part.id) is None
 
 
 def _po_recommendation(db: Session, part_id: int, *, vendor_id: int = None) -> AIRecommendation:
@@ -1408,7 +1409,8 @@ def test_added_filters_did_not_widen_or_drop_company_scoping(client: TestClient,
     b_search = client.get("/api/v1/search/", headers=headers_b, params={"q": "Tenant-A Only"}).json()["results"]
     assert not any(r["type"] == "vendor" and r["id"] == vendor_a.id for r in b_search)
     assert match_vendor("Tenant-A Only Alloys", db_session, company_id=2).match_id != vendor_a.id
-    assert MRPAutoService(db_session, company_id=2)._get_preferred_vendor(part_b.id).id == vendor_b.id
+    # B's part has no sourcing of its own yet, so the MRP picker picks nobody -- never A's vendor.
+    assert MRPAutoService(db_session, company_id=2)._get_preferred_vendor(part_b.id) is None
 
     # --- Not dropped: B still reaches its OWN live vendor on the same paths. ------------
     assert (
@@ -1425,6 +1427,7 @@ def test_added_filters_did_not_widen_or_drop_company_scoping(client: TestClient,
         ).status_code
         == status.HTTP_200_OK
     )
+    assert MRPAutoService(db_session, company_id=2)._get_preferred_vendor(part_b.id).id == vendor_b.id
     assert client.get("/api/v1/setup/health", headers=headers_b).json()["counts"]["vendors"] == 1
 
     # A's own vendor is untouched by every refusal above -- assert the VICTIM'S STORED ROW,

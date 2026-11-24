@@ -321,30 +321,38 @@ def test_low_stock_route_company_only_still_counts_held_stock(client: TestClient
 
 
 # ===========================================================================
-# 3. The stock.low cron (per-row comparison)
+# 3. The stock.low cron (the one low-stock rule: per part, company-owned on-hand summed)
 # ===========================================================================
 
 
 @pytest.mark.parametrize("kind", OWNER_KINDS)
 def test_stock_low_cron_counts_company_rows_not_owned_rows(db_session: Session, monkeypatch, kind):
-    """Owned rows below and AT the reorder point are no longer counted; the company row is."""
+    """Parts are counted, not rows, and owned rows add nothing to on hand: ``part`` holds 5 of
+    its own (owned lots of 5 and 50 beside it) and ``owned_only`` none, so both are low; a part
+    whose OWN stock is above the point is not, however much owned stock is short."""
     part = _reorder_part(db_session, reorder_point=50)
     _lot(db_session, part, 5)
     _lot(db_session, part, 5, owner=kind)
     _lot(db_session, part, 50, owner=kind)
     owned_only = _reorder_part(db_session, reorder_point=50)
     _lot(db_session, owned_only, 1, owner=kind)
+    covered = _reorder_part(db_session, reorder_point=50)
+    _lot(db_session, covered, 60)
+    _lot(db_session, covered, 1, owner=kind)
 
     result, calls = _run_low_stock_cron(db_session, monkeypatch)
 
-    assert result == {"low_stock_items": 1}
+    assert result == {"low_stock_items": 2}
     assert [(c["event_key"], c["company_id"]) for c in calls] == [("stock.low", COMPANY_A)]
 
 
 @pytest.mark.parametrize("kind", OWNER_KINDS)
-def test_stock_low_cron_sends_nothing_for_owned_rows_alone(db_session: Session, monkeypatch, kind):
+def test_stock_low_cron_sends_nothing_when_own_stock_covers_the_point(db_session: Session, monkeypatch, kind):
+    """An owned lot below the point never raises the alert for a part the shop's own stock
+    covers (the old per-row rule would have counted the owned row)."""
     part = _reorder_part(db_session, reorder_point=50)
     _lot(db_session, part, 5, owner=kind)
+    _lot(db_session, part, 51)
 
     result, calls = _run_low_stock_cron(db_session, monkeypatch)
 
@@ -353,18 +361,19 @@ def test_stock_low_cron_sends_nothing_for_owned_rows_alone(db_session: Session, 
 
 
 def test_stock_low_cron_company_only_still_counts_held_rows(db_session: Session, monkeypatch):
-    """The cron's own rule, by hand: each row at or below its part's reorder point, in ANY
-    status. ``AUTO_DRAW_ITEM_CLAUSES`` would keep only the available and NULL rows (2)."""
+    """The rule by hand: every ACTIVE company row in ANY status sums into on hand.
+    ``AUTO_DRAW_ITEM_CLAUSES`` would keep only the available and NULL rows."""
     part = _reorder_part(db_session, reorder_point=50)
-    _lot(db_session, part, 5)  # counted
-    _lot(db_session, part, 7, status_="on_hold")  # counted
-    _lot(db_session, part, 50, status_="quarantine")  # counted: at the point
-    _lot(db_session, part, 1, status_=None)  # counted
-    _lot(db_session, part, 51)  # above the point
+    _lot(db_session, part, 5)
+    _lot(db_session, part, 7, status_="on_hold")
+    _lot(db_session, part, 37, status_="quarantine")
+    _lot(db_session, part, 1, status_=None)  # 5 + 7 + 37 + 1 = 50: AT the point, low
+    held_cover = _reorder_part(db_session, reorder_point=50)
+    _lot(db_session, held_cover, 51, status_="on_hold")  # held stock still covers the point
 
     result, calls = _run_low_stock_cron(db_session, monkeypatch)
 
-    assert result == {"low_stock_items": 4}
+    assert result == {"low_stock_items": 1}
     assert [c["event_key"] for c in calls] == ["stock.low"]
 
 
@@ -392,8 +401,8 @@ def test_inbox_raises_low_stock_for_parts_held_up_only_by_owned_stock(db_session
 
 
 def test_inbox_company_only_still_counts_held_stock(db_session: Session):
-    """The inbox's own rule, by hand: every ACTIVE row in ANY status, strictly below the
-    reorder point."""
+    """The inbox reads the one low-stock rule: every ACTIVE company row in ANY status, at or below
+    the reorder point."""
     user = make_user(db_session)
     mixed = _reorder_part(db_session, reorder_point=50, safety_stock=5)
     _lot(db_session, mixed, 10)

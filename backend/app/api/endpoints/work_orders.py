@@ -2190,7 +2190,7 @@ def browse_orders(
     search: Optional[str] = Query(None, max_length=200),
     customer: Optional[str] = Query(None, max_length=255),
     hide_cots: bool = True,
-    scope: Optional[Literal["overdue", "due_today"]] = None,
+    scope: Optional[Literal["overdue", "due_today", "late"]] = None,
     work_order_type: Optional[WorkOrderType] = Query(
         None,
         description="Only this work-order type: 'laser_cutting' = nest packages, 'production' = everything else.",

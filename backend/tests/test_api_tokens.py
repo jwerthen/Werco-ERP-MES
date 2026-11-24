@@ -798,7 +798,7 @@ class TestDeactivation:
         keep = _issue(client, admin_headers, test_user.id, label="kept").json()
         assert (
             client.put(
-                f"{USERS_URL}{test_user.id}", json={"version": 1, "department": "Ops"}, headers=admin_headers
+                f"{USERS_URL}{test_user.id}", json={"version": 1, "department": "Production"}, headers=admin_headers
             ).status_code
             == 200
         )

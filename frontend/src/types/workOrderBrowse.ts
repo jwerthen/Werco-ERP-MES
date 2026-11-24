@@ -8,7 +8,8 @@ export interface WorkOrderBrowseParams {
   search?: string;
   customer?: string;
   hide_cots?: boolean;
-  scope?: 'overdue' | 'due_today';
+  /** `late` = the daily late-jobs summary's rule: released, in progress or held, past `must_ship_by`, else `due_date`. */
+  scope?: 'overdue' | 'due_today' | 'late';
   /** `laser_cutting` = nest packages; `production` = every other work order. */
   work_order_type?: WorkOrderTypeFilter;
   sort?: 'work_order_number' | 'part' | 'customer' | 'due_date' | 'priority' | 'status';

@@ -241,3 +241,20 @@ class TokenRefresh(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
+
+
+class UnlistedDepartmentUser(BaseModel):
+    """A user whose stored Department is not on the pick list (and so matches no notification)."""
+
+    id: int
+    name: str
+    employee_id: str
+    is_active: bool
+    department: str
+
+
+class UserDepartmentsResponse(BaseModel):
+    """``GET /users/departments``: the fixed pick list, and every user whose stored value is not on it."""
+
+    departments: list[str]
+    unlisted: list[UnlistedDepartmentUser]

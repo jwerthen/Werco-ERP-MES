@@ -1,6 +1,8 @@
 import type { BOMExploded } from '../types/engineering';
 import type { MaterialPriceHistoryParams, MaterialPriceHistoryResponse, MaterialPriceHistoryDetailParams, MaterialPriceHistoryDetail } from '../types/materialPriceHistory';
 import type { EmailRecipientsSettings } from '../types/emailRecipients';
+import type { LowStockAlert } from '../types/lowStock';
+import type { UserDepartments } from '../types/userDepartments';
 import type {
   CustomReportRequest,
   CustomReportResult,
@@ -3445,8 +3447,8 @@ class ApiService {
     return response.data;
   }
 
-  async getLowStockAlerts() {
-    const response = await this.api.get('/inventory/low-stock');
+  async getLowStockAlerts(): Promise<LowStockAlert[]> {
+    const response = await this.api.get<LowStockAlert[]>('/inventory/low-stock');
     return response.data;
   }
 
@@ -4377,6 +4379,12 @@ class ApiService {
 
   async getUsers(includeInactive = false) {
     const response = await this.api.get('/users/', { params: { include_inactive: includeInactive } });
+    return response.data;
+  }
+
+  /** The Department pick list and the users whose stored value is not on it (Admin only). */
+  async getUserDepartments(): Promise<UserDepartments> {
+    const response = await this.api.get<UserDepartments>('/users/departments');
     return response.data;
   }
 

@@ -1309,7 +1309,7 @@ company-scoped.
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/work-orders/` | List all work orders (`skip` ≥ 0, `limit` 1–5000 default 100 — the standard list tier, see [Pagination](#pagination)). `deleted_only=true` returns **only** this company's soft-deleted work orders — the restore view, **Admin / Manager**, and the only read in the API that can see one; see "Seeing a deleted work order" below | Yes (`deleted_only=true`: Admin / Manager) |
-| GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders against the **Central** date); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
+| GET | `/work-orders/browse` | **The bounded, server-filtered page behind the Work Orders list screen.** Returns an **envelope**, not a bare array. Query: `skip` ≥ 0 (default 0; a `skip` past the last page is clamped to that page's start, and the response's `skip` reports the clamped value), `limit` **1–100** (default 50); `status` (one `WorkOrderStatus`; omitted = every status except complete / closed / cancelled); `search` (≤ 200 chars, a **literal** case-insensitive substring — `%` / `_` are not wildcards — over WO number, customer name, customer PO, lot, unit #, part number and part name); `customer` (≤ 255, exact customer name); `hide_cots` (default `true`: hides work orders whose part is purchased / hardware / raw material; part-less ones stay); `scope` (`overdue` \| `due_today`, open work orders by `due_date` against the **Central** date; or `late`, the daily `wo.late` summary's own rule: a released / in-progress / on-hold work order past its promise date — `must_ship_by`, else `due_date` — drafts never late); `work_order_type` (`production` \| `laser_cutting`, unknown → **422**; `laser_cutting` = nest packages — standalone laser work orders and the laser children a nest import hangs off a production job); `sort` (`work_order_number` \| `part` \| `customer` \| `due_date` \| `priority` (default) \| `status`, nulls last, ID tiebreaker) with `direction` (`asc` default \| `desc`); `group` (`none` default \| `customer` \| `part` \| `status`, rows ordered by group first). Response: `items` (`WorkOrderSummary` rows with operation progress), `total` (the full filtered count), `skip`, `limit`, `has_next`, `stats` (`overdue` / `in_progress` / `due_today` over the filtered set), `customers` (distinct customer names under every filter **except** `customer` — it honors `work_order_type` — capped at 1000, with `customers_truncated`), `group_totals` (full counts for only the groups on this page; `{}` when `group=none`), and `type_counts` (`{production, laser_cutting}`, both always present, zero-filled: rows per type under every **other** filter, `customer` included, deliberately **ignoring** `work_order_type` so each type chip shows its own count). A pure read sent `Cache-Control: no-store`: it **never reconciles on read** — no completion evidence, READY promotion or inventory effect — so loading the list does not heal a stranded work order the way `GET /work-orders/{id}` does (see "A read heals a stranded work order" below) | Effective `work_orders:view` in the active company (every role by default; **403** when a company role override removes it) |
 | POST | `/work-orders/` | Create work order. `work_order_type` is validated against the `WorkOrderType` vocabulary (**422** on an unknown value), and `'laser_cutting'` is **refused on create** (422) — nest-dispatch WOs are minted only by the laser nest import paths (see note below). Body accepts `sequential_operations` (**default `true`** — a sequenced routing; see "READY promotion" below) and the optional `unit_number` (≤ 50 chars — see "Unit #" below) | Yes |
 | GET | `/work-orders/{id}` | Get work order by ID. Also carries the job's cost by element (`job_cost_actuals`), the inventory-ledger material figure (`issued_material_cost`) and, per operation, where its actual hours come from (`hours_source`, `recorded_setup_hours`, `recorded_run_hours`, `hours_include_backfill`) — see "Cost and actual hours on the work-order read" below | Yes |
 | GET | `/work-orders/by-number/{wo_number}` | Get work order by number: the **same body** as by ID (every computed field included). A soft-deleted work order is **404**, as by ID. Unlike the read by ID it does **not** reconcile on read — it writes nothing | Yes |
@@ -10640,8 +10640,8 @@ when an estimate is approved and handed off in Fabrication Quoting (`/fabricatio
 > **The selection reads that only *looked* right now really are.** `GET /po-upload/search-vendors`
 > and the PO-extraction vendor matcher filtered `is_active` alone — which excluded deleted vendors
 > only because `DELETE` happens to clear that flag — and so did global search and the MRP auto-PO
-> vendor picker (which chooses a supplier for `AUTO_DRAFT` / `AUTO_SUBMIT` orders with no human in
-> the loop). All four now filter `is_deleted` for real. Result sets are unchanged unless a vendor was
+> vendor picker (which chooses a supplier for an explicitly enqueued `AUTO_DRAFT` run's draft orders;
+> no cron runs it and `AUTO_SUBMIT` was removed 2026-11-23). All four now filter `is_deleted` for real. Result sets are unchanged unless a vendor was
 > already in the `is_deleted=true` + `is_active=true` state the `PUT` above could produce.
 >
 > **What still names — and still accepts — a deleted vendor, deliberately:** anything that is a
@@ -11045,19 +11045,20 @@ that creates a PO:
   offers a plan the gate would refuse.
 - `POST /po-upload/create-from-upload`, before any part is created.
 - `POST /mrp/actions/{action_id}/supply-draft` (purchase) and `POST /mrp/purchase-batch/drafts`. The
-  MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` / `AUTO_SUBMIT`),
+  MRP supply review's supplier list, and the MRP auto-PO vendor picker (`AUTO_DRAFT` only, never scheduled),
   never offer or choose a Disqualified vendor. The picker does not **re-route** either: a part whose
   only supplier on record (supplier-part mapping or purchase history) is Disqualified is not handed to
-  the "first active vendor" fallback, which would draft it to an unrelated supplier. The auto-PO job
-  writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
+  another vendor. The auto-PO pass writes no purchase order for it and records the reason on the MRP action (*"{Vendor} is Disqualified
   on the Approved Supplier List and is the only supplier this part is sourced from …; MRP does not pick
-  another supplier for it. Choose one on the MRP supply review."*). The fallback stays for a part with
-  no sourcing at all.
+  another supplier for it. Choose one on the MRP supply review."*). There is no "first active vendor"
+  fallback any more (removed 2026-11-23): a part with no sourcing at all gets no draft either, and its
+  action records *"This part has no supplier-part mapping and no purchase history, so MRP does not pick a
+  supplier for it. Choose one on the MRP supply review."*
 - The open-PO Excel loader (`POST /purchasing/purchase-orders/import`), as that purchase order's row
   error with the same text.
 
-**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (the
-6 AM MRP auto-draft, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
+**An existing PO cannot move toward issue either.** A PO raised before its vendor was Disqualified (an
+MRP AUTO_DRAFT pass, a buyer's draft) is refused **409** *"{Vendor} is Disqualified on the Approved
 Supplier List; purchase order {PO} {cannot be sent | cannot be approved | cannot be submitted for
 approval | cannot have lines added or changed | cannot be emailed}. Cancel it, or record a new approval
 decision for the supplier first."* on `POST .../send`, a `PUT` to `approved` / `pending_approval`, a
@@ -11904,7 +11905,7 @@ environment variables are required.
 |--------|----------|-------------|---------------|
 | GET | `/inventory/` | List inventory items (`part_id`, `warehouse`, `location_code`, `has_quantity` — `has_quantity` filters **nonzero**, not positive, so driven-negative lots stay visible; see note below — and `ownership`, `owner_customer_id`, `owner_vendor_id`). Each row carries `ownership`, the owner id and `owner_name` (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)). Bounded: `limit` **1–10000, default 10000**, `offset` ≥ 0 | Yes |
 | GET | `/inventory/summary` | On-hand summary by part, with per-location breakdown (every active row with **nonzero** on-hand, negatives included). `total_on_hand` is physical stock whoever owns it; `owned_by_others_on_hand` is the customer- and supplier-owned part of it, and each location entry carries its row's `ownership`. Bounded with the identical `limit`/`offset` as `/inventory/` — see note below | Yes |
-| GET | `/inventory/low-stock` | Parts at/below reorder point. `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
+| GET | `/inventory/low-stock` | Live parts with a reorder point above zero whose on-hand is at or below it -- the one low-stock rule (`low_stock_service`), shared with the `stock.low` alert, the operations inbox and the AI inventory sensor. Sorted critical first (on hand at or below safety stock), then by largest shortage, then part number. Each row also carries `out_of_stock` (a part with no stock row at all is listed at 0 on hand). `quantity_on_hand` is the **company's own** on-hand, summed per part over active rows in any status; customer- and supplier-owned stock is not counted, so a part whose only stock is owned reads 0 and is listed (see [Customer- and supplier-owned property](#customer--and-supplier-owned-property)) | Yes |
 | GET | `/inventory/locations` | List warehouse locations / bins | Yes |
 | POST | `/inventory/locations` | Create a location | Admin / Manager |
 | GET | `/inventory/transactions` | Inventory transaction (ledger) history, newest first. Filters: `part_id`, `transaction_type`, `reference_type`, `reference_id`, `work_order_id`, `lot_number`, `start_date`, `end_date`. Offset-paged (`limit` 1–500 default 100, `offset` ≥ 0), **no total count** — see note below | Yes |
@@ -12332,7 +12333,7 @@ signal quiet. These readers count company-owned rows only:
   `quantity_shortage` and the actions built from them, and the supply review's current-shortage
   recheck and review fingerprint. See [Material Requirements Planning](#material-requirements-planning-mrp).
 * `GET /inventory/low-stock` (a part whose only stock is owned reads 0 on hand and is listed).
-* The `stock.low` digest cron (`check_low_stock_task`).
+* The `stock.low` cron (`check_low_stock_task`), through the shared `low_stock_service` rule.
 * The operations inbox's `low_stock` source, which Hank's shift briefing also reads.
 * The AI `inventory_risk` sensor.
 * The reorder judgment on `GET /consumables/stock` (owned rows are still listed).
@@ -12359,10 +12360,9 @@ inventory export) still count every row.
 >
 > **The flag and the netting rule are separate.** Netting is unchanged: an **unflagged** part still
 > nets against company-owned stock only. So a part the customer furnishes that nobody has flagged
-> still shows a shortage and an action even with the customer's material on the rack, and where the
-> 06:00 `run_mrp_auto_draft_job` cron runs, that action can still become a draft purchase order (to
-> the company's first active vendor when the part has no sourcing) or a draft work order. Flagging
-> the part is what stops it.
+> still shows a shortage and an action even with the customer's material on the rack, and a buyer
+> could still draft supply from it on the MRP supply review. (The 06:00 MRP cron is REVIEW-only since
+> 2026-11-23 and drafts nothing.) Flagging the part is what stops it.
 >
 > **Not changed:** nothing outside MRP reads the flag. The low-stock and reorder readers above, the
 > AI `inventory_risk` sensor included, treat a flagged part like any other, so a flagged part with a
@@ -12734,10 +12734,10 @@ furnishes, so MRP plans no supply for it:
   supply refuses a flagged part with one text, `mrp_service.CUSTOMER_SUPPLIED_SUPPLY_DETAIL`:
   *"This part is customer-supplied: the customer furnishes it, so MRP does not plan supply for it.
   Clear the part's customer-supplied flag first if the shop now buys or makes it."*
-  * The auto-draft cron (`run_mrp_auto_draft_job` → `MRPAutoService.process_actions`) creates no
-    purchase order or work order and sends no `mrp.expedite_required` for it. It writes the text to
-    the action's `error_message`, counts it among the job's errors and leaves the action unprocessed,
-    so the auto-PO job's first-active-vendor fallback is never reached for a flagged part.
+  * An AUTO_DRAFT pass (`MRPAutoService.process_actions`; explicitly enqueued only -- the 06:00
+    cron is REVIEW-only) creates no purchase order and sends no `mrp.expedite_required` for it. It
+    writes the text to the action's `error_message`, counts it among the job's errors and leaves the
+    action unprocessed. (No automatic pass drafts a work order at all.)
   * The reviewed supply draft: `GET /mrp/actions/{action_id}/supply-review` returns the text as
     `blocked_reason` (checked before the newer-run and covered-shortage reasons), and
     `POST /mrp/actions/{action_id}/supply-draft` refuses **409**
@@ -13779,12 +13779,21 @@ There is no delete endpoint.
 
 ### Users (Admin)
 
+> **Department is a pick list (2026-11-23).** `department` on `POST /users/`, `PUT /users/{id}`,
+> `POST /users/{id}/approve`, `POST /auth/register` and the user import must be one of Purchasing,
+> Inventory, Sales, Quality, Maintenance, Shipping, Production, Other (any case or spacing; the
+> canonical spelling is stored) or blank -- else **422** *"Department must be one of: Purchasing,
+> Inventory, Sales, Quality, Maintenance, Shipping, Production, Other (or left blank)."* Notifications
+> match departments by exact name, which is why. A `PUT` that re-sends a user's existing legacy value
+> unchanged is accepted; `GET /users/departments` lists those values for correction. No migration.
+
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/users/` | List all users | Admin / Manager |
 | POST | `/users/` | Create user | Admin |
 | POST | `/auth/register` | Alternate tenant-user creation path with the same role policy | Admin |
-| POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply | Admin |
+| POST | `/users/import-csv` | Import CSV/XLSX users; existing dry-run and per-row error contracts apply. A `department` not on the pick list is that row's error | Admin |
+| GET | `/users/departments` | The fixed Department pick list and every user whose stored Department is not on it: `{"departments": ["Purchasing", "Inventory", "Sales", "Quality", "Maintenance", "Shipping", "Production", "Other"], "unlisted": [{"id", "name", "employee_id", "is_active", "department"}]}`. Writes nothing | Admin |
 | PUT | `/users/{id}` | Update user. `is_active: false` also revokes every live API token the user holds (reason `user deactivated`, audited) — see [API tokens](#api-tokens-bots-and-mcp-clients) — and the user's export authorization (one `EXPORT_AUTHORIZATION_REVOKE` row). A role change into Admin, Manager or Quality from any other role clears the user's floor PIN and, if they had one, requires a new one from an Admin (see the floor PIN note below) | Admin |
 | POST | `/users/{id}/approve` | Approve a pending tenant account with a tenant role. Approving into Admin, Manager or Quality clears any floor PIN the account carried and, if it had one, requires a new one from an Admin | Admin |
 | POST | `/users/{id}/reset-password` | Reset another account's password | Admin |
@@ -14175,7 +14184,7 @@ table and no environment variable.
 | Method | Endpoint | Description | Auth Required |
 |--------|----------|-------------|---------------|
 | GET | `/admin/settings/audit-log` | Settings/quote-config change history (filterable, up to 1yr) | Admin |
-| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory | Admin |
+| GET | `/admin/settings/email-recipients` | Email types, selections, missing defaults and the company's user directory. Each event also carries who it **actually reaches** today: `audience_source` (`selected` = the saved or shipped list, exclusive; `automatic` = the catalog's roles or departments with each person's own email choice applied), `reaches_user_ids` (deliverable addresses only), `depends_on_record` (the event also reaches people derived from the record, e.g. its creator) and `reaches_nobody` | Admin |
 | PUT | `/admin/settings/email-recipients/{event_key}` | Set one email type's recipients (`{"user_ids": [...]}`; `null` restores the default). **400** on an unknown email type, or on a user who is not an active user of this company with a deliverable address | Admin |
 | GET | `/admin/settings/work-center-rates` | Work centers with their hourly rates (`include_inactive` default false) | Admin |
 | PUT | `/admin/settings/work-center-rates/{work_center_id}` | Set a work center's hourly (labor costing) rate. **404** on another company's work center | Admin |

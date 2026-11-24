@@ -10,6 +10,7 @@ import { addDays } from 'date-fns';
 import api from '../../../services/api';
 import { getCentralDateStamp, getCentralTodayDate } from '../../../utils/centralTime';
 import type { CoreSourceKey, SourceSpec } from '../widgetTypes';
+import type { LowStockAlert } from '../../../types/lowStock';
 
 /** `GET /quality/summary`. `ncr_dispositions` counts NCRs CREATED this (server UTC) month by CURRENT disposition. */
 export interface QualitySummaryData {
@@ -29,11 +30,7 @@ export interface EquipmentDueSoonRow {
 }
 
 /** One row of `GET /inventory/low-stock`; the dashboard counts rows. */
-export interface LowStockRow {
-  id?: number;
-  part_number?: string;
-  is_critical?: boolean;
-}
+export type LowStockRow = LowStockAlert;
 
 export interface CapacityHeatmapDay {
   date: string;

@@ -2701,6 +2701,7 @@ UI controls do not grant API authority. See [API: Documents](API.md#documents).
 | Edit | ✓ | | | | | | |
 | Delete | ✓ | | | | | | |
 | Roles | ✓ | | | | | | |
+| Department pick list + users whose stored Department is off it (`GET /users/departments`; read-only) | ✓ | | | | | | |
 | Floor PIN — set / reset / clear / unlock (`PUT` / `DELETE /users/{user_id}/floor-pin`, `POST …/floor-pin/unlock`; signed in — any API token 403). Manager: Operator / Supervisor / Shipping / Viewer accounts only | ✓ | ✓ | | | | | |
 | Grant / revoke export authorization (`PUT /users/{id}/export-authorization`; reason required; no API token) | ✓ | | | | | | |
 | Own profile + notification settings (`/users/me/*`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |

@@ -192,7 +192,20 @@ beforeEach(() => {
   mockedApi.getDashboardWithCache.mockResolvedValue({ data: dashboardData as any, fromCache: false, changed: true });
   mockedApi.getQualitySummary.mockResolvedValue({ open_ncrs: 2, open_cars: 1, pending_fais: 0, ncr_dispositions: {} });
   mockedApi.getEquipmentDueSoon.mockResolvedValue([{ days_until_due: 5 }]);
-  mockedApi.getLowStockAlerts.mockResolvedValue([{ id: 1 }]);
+  mockedApi.getLowStockAlerts.mockResolvedValue([
+    {
+      part_id: 1,
+      part_number: 'PN-1',
+      part_name: 'Bracket',
+      quantity_on_hand: 0,
+      reorder_point: 5,
+      reorder_quantity: 10,
+      safety_stock: 0,
+      shortage: 5,
+      is_critical: true,
+      out_of_stock: true,
+    },
+  ]);
   mockedApi.getCapacityHeatmap.mockResolvedValue({
     start_date: '2026-06-28',
     end_date: '2026-07-04',

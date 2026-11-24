@@ -13,6 +13,22 @@ from app.services.work_order_state_service import work_order_operation_progress
 
 TERMINAL = (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED)
 EXCLUDED_TYPES = (PartType.PURCHASED, PartType.HARDWARE, PartType.RAW_MATERIAL)
+# Work on the floor or held there: what the daily late-jobs summary (``wo.late``) counts. A DRAFT
+# is not yet promised to the floor, so it is never late in that sense.
+LATE_STATUSES = (WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD)
+
+
+def late_promise_date():
+    """The promise date a late job is judged on: ``must_ship_by`` when set, else ``due_date``."""
+    return func.coalesce(WorkOrder.must_ship_by, WorkOrder.due_date)
+
+
+def late_work_order_clause(today):
+    """THE one definition of a late work order, shared by the ``wo.late`` summary cron and the
+    Work Orders list's ``scope=late`` (the page the summary links to), so the email's count and the
+    list it opens are the same set. Callers add the tenant and ``is_deleted`` predicates."""
+    promise = late_promise_date()
+    return and_(WorkOrder.status.in_(LATE_STATUSES), promise.isnot(None), promise < today)
 
 
 def summary(wo):
@@ -93,6 +109,8 @@ def browse_work_orders(
         query = query.filter(overdue)
     elif scope == 'due_today':
         query = query.filter(due_today)
+    elif scope == 'late':
+        query = query.filter(late_work_order_clause(today))
     # The type filter (production vs. laser-cutting nest package) is a FACET: the
     # customer list below honors it, and `type_counts` deliberately ignores it so the
     # quick-filter chips can say how many of each type the OTHER filters leave --

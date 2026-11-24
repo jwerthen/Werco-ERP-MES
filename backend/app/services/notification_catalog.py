@@ -367,13 +367,15 @@ _ENTRIES: List[CatalogEntry] = [
     ),
     CatalogEntry(
         event_key="wo.late",
-        label="Work order late",
-        description="A released work order passed its due date.",
+        label="Late work orders",
+        description="Once a day: how many released work orders are past their promise date, and the ten most overdue.",
         category=Category.PRODUCTION,
         severity="warning",
         default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_EMAIL}),
+        # One summary per recipient per company day: the summary is keyed on the DAY
+        # (related_type "LateWorkOrderSummary", related_id YYYYMMDD), not on a work order.
         recurring=True,
-        source_event_types=(),  # cron-driven via dispatch_direct
+        source_event_types=(),  # cron-driven via dispatch_direct (check_late_work_orders_job)
         roles=(UserRole.SUPERVISOR, UserRole.MANAGER),
     ),
     CatalogEntry(
@@ -570,6 +572,20 @@ _ENTRIES: List[CatalogEntry] = [
         departments=("Quality",),
     ),
     CatalogEntry(
+        event_key="calibration.overdue",
+        label="Calibration overdue",
+        description="A gauge in service is past its calibration due date.",
+        category=Category.QUALITY,
+        severity="critical",
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_DIGEST}),
+        # A standing overdue gauge is ONE unread inbox row per person (re-raised once read, while
+        # still overdue), plus the digest line -- not a fresh push every morning.
+        recurring=True,
+        source_event_types=(),  # cron-driven via dispatch_direct (check_calibrations_job)
+        roles=(UserRole.QUALITY,),
+        departments=("Quality",),
+    ),
+    CatalogEntry(
         event_key="cert.expiring",
         label="Certification expiring",
         description="An operator certification is expiring.",
@@ -722,10 +738,12 @@ _ENTRIES: List[CatalogEntry] = [
     CatalogEntry(
         event_key="stock.low",
         label="Low stock",
-        description="Inventory dropped below its reorder point.",
+        description="Parts are at or below their reorder point.",
         category=Category.PURCHASING,
         severity="warning",
-        default_channels=frozenset({CHANNEL_DIGEST}),
+        # In-app so it reaches the bell (it was digest-only, and the digest reached almost no one).
+        # One daily count; recurring, so an unread one is not stacked by the next morning's.
+        default_channels=frozenset({CHANNEL_IN_APP, CHANNEL_DIGEST}),
         recurring=True,
         source_event_types=(),  # cron-driven via dispatch_direct
         departments=("Purchasing", "Inventory"),
@@ -841,7 +859,7 @@ _ENTRIES: List[CatalogEntry] = [
     CatalogEntry(
         event_key="mrp.completed",
         label="MRP run completed",
-        description="An MRP run finished and auto-processed actions.",
+        description="An MRP run finished.",
         category=Category.PURCHASING,
         severity="info",
         default_channels=frozenset({CHANNEL_EMAIL}),

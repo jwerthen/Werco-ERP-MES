@@ -120,7 +120,8 @@ def test_live_sources_exclude_resolved_and_outside_tenant(client, db_session, au
     rows['wo'].status = WorkOrderStatus.COMPLETE
     rows['ncr'].status = NCRStatus.CLOSED
     rows['line'].quantity_received = 10
-    rows['stock'].quantity_on_hand = 10
+    # Above the reorder point (10): AT the point is still low under the one low-stock rule.
+    rows['stock'].quantity_on_hand = 11
     db_session.commit()
     assert get_items(client, auth_headers) == []
 

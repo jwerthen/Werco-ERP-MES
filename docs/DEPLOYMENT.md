@@ -244,7 +244,8 @@ boot migration path. No environment variable, secret, cron or worker job is adde
 - **Behavior change to tell planners and buyers.** Flag each part the customer furnishes (the
   **Customer-supplied** checkbox on the Part or Materials edit form; Admin / Manager / Supervisor).
   Until a part is flagged, MRP still shows its demand as a shortage against company-owned stock, and
-  the 06:00 auto-draft cron can still draft supply for it. A flagged part can still be reported low
+  a buyer can still draft supply for it from the MRP supply review (the 06:00 MRP cron is REVIEW-only
+  since 2026-11-23 and drafts nothing). A flagged part can still be reported low
   against its reorder point, since the low-stock and reorder readers do not read the flag.
 - **Verify** after the deploy, read-only: `SELECT is_nullable, column_default FROM
   information_schema.columns WHERE table_name = 'parts' AND column_name = 'customer_supplied';`
@@ -254,8 +255,8 @@ boot migration path. No environment variable, secret, cron or worker job is adde
   the flag, run again and confirm they return.
 - **Rollback.** Keep the column on an ordinary application rollback: from a checkout of this release
   run `railway run --service werco-api alembic stamp 133_maintenance_log_provenance` before redeploying
-  a pre-134 image. While the old code runs it plans demand for flagged parts again, and the auto-draft
-  cron can draft supply for them; the flags stay, and the next forward deploy re-runs `134` as a
+  a pre-134 image. While the old code runs it plans demand for flagged parts again, and a pre-2026-11-23
+  image's auto-draft cron (if armed) can draft supply for them; the flags stay, and the next forward deploy re-runs `134` as a
   guarded no-op that keeps them. The **downgrade is lossy** and not a rollback step: it drops the
   column and every flag (the `log_update` audit rows still record who flagged which part, but nothing
   re-derives the column from them).

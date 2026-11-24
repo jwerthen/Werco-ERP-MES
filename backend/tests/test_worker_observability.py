@@ -226,7 +226,7 @@ class TestTheCronInventoryIsStable:
 
         names = {job.name.removeprefix("cron:") for job in ALL_CRON_JOBS}
         assert names == {
-            "run_mrp_auto_draft_job",
+            "run_mrp_review_job",
             "send_daily_digest_job",
             "check_calibrations_job",
             "check_late_work_orders_job",
@@ -248,8 +248,8 @@ class TestTheCronInventoryIsStable:
 # WORKER_CRON_JOBS exclusions ("-" prefix)
 # ---------------------------------------------------------------------------
 #
-# The owner wants ONE cron off (``run_mrp_auto_draft_job``, which writes draft POs and work
-# orders at 06:00). Before exclusions existed the only way to say that was to list the other
+# The owner wants ONE cron off (originally the MRP auto-draft pass at 06:00, since replaced by
+# ``run_mrp_review_job``, which drafts nothing). Before exclusions existed the only way to say that was to list the other
 # eleven -- an allowlist, which FREEZES the schedule: a thirteenth cron added next release
 # would silently never register on that worker. That is "I enabled the cron and nothing
 # happened" again, just delayed, which is the exact failure this module exists to eliminate.
@@ -263,9 +263,9 @@ OWNER_ALLOWLIST_VALUE = (
 )
 
 # The value they can write instead.
-OWNER_EXCLUSION_VALUE = "all,-run_mrp_auto_draft_job"
+OWNER_EXCLUSION_VALUE = "all,-run_mrp_review_job"
 
-MRP_CRON = "cron:run_mrp_auto_draft_job"
+MRP_CRON = "cron:run_mrp_review_job"
 
 
 def _all_names():
@@ -384,7 +384,7 @@ class TestCronSelectionRegressionsBeforeExclusions:
         advise "Use 'all'" -- an operator staring at ``WORKER_CRON_JOBS=all,`` read that as
         "'all' is unknown; use 'all'" and chased the wrong token. It now gets its own message
         naming the comma, which is the likeliest way to land here: deleting the exclusion from
-        ``all,-run_mrp_auto_draft_job`` after the MRP cutover and leaving the comma behind.
+        ``all,-run_mrp_review_job`` after the MRP cutover and leaving the comma behind.
 
         The exclusion form splits first, so ``"-x,"`` is accepted -- an asymmetry an operator
         can trip over, and loud either way (nothing silently arms the wrong schedule). Whether
@@ -400,7 +400,7 @@ class TestCronSelectionRegressionsBeforeExclusions:
             # It must NOT claim the keyword is an unknown cron job -- that was the old defect.
             assert "unknown cron job" not in message, spec
         # The exclusion form tolerates it.
-        assert len(select_cron_jobs("-run_mrp_auto_draft_job,")) == len(_all_names()) - 1
+        assert len(select_cron_jobs("-run_mrp_review_job,")) == len(_all_names()) - 1
 
     def test_a_spec_that_is_only_separators_is_refused_rather_than_arming_nothing(self):
         """The one malformed input that used to return a SET instead of raising.
@@ -432,7 +432,7 @@ class TestCronExclusions:
     def test_all_minus_a_job_arms_everything_else(self):
         from app.worker import select_cron_jobs
 
-        selected = select_cron_jobs("all,-run_mrp_auto_draft_job")
+        selected = select_cron_jobs("all,-run_mrp_review_job")
         names = [job.name for job in selected]
         assert MRP_CRON not in names
         assert names == [n for n in _all_names() if n != MRP_CRON]
@@ -442,8 +442,8 @@ class TestCronExclusions:
         has nothing else it could be subtracting from."""
         from app.worker import select_cron_jobs
 
-        assert [j.name for j in select_cron_jobs("-run_mrp_auto_draft_job")] == [
-            j.name for j in select_cron_jobs("all,-run_mrp_auto_draft_job")
+        assert [j.name for j in select_cron_jobs("-run_mrp_review_job")] == [
+            j.name for j in select_cron_jobs("all,-run_mrp_review_job")
         ]
 
     def test_the_cron_prefixed_spelling_excludes_identically(self):
@@ -452,11 +452,11 @@ class TestCronExclusions:
         already did for inclusions."""
         from app.worker import select_cron_jobs
 
-        assert [j.name for j in select_cron_jobs("-cron:run_mrp_auto_draft_job")] == [
-            j.name for j in select_cron_jobs("-run_mrp_auto_draft_job")
+        assert [j.name for j in select_cron_jobs("-cron:run_mrp_review_job")] == [
+            j.name for j in select_cron_jobs("-run_mrp_review_job")
         ]
-        assert [j.name for j in select_cron_jobs("all,-cron:run_mrp_auto_draft_job")] == [
-            j.name for j in select_cron_jobs("all,-run_mrp_auto_draft_job")
+        assert [j.name for j in select_cron_jobs("all,-cron:run_mrp_review_job")] == [
+            j.name for j in select_cron_jobs("all,-run_mrp_review_job")
         ]
 
     def test_the_result_follows_all_cron_jobs_order_not_the_operators_order(self):
@@ -466,17 +466,17 @@ class TestCronExclusions:
 
         # Listed MRP-then-poll; ALL_CRON_JOBS has MRP first and poll second-to-last, and the
         # surviving crons must come back in ALL_CRON_JOBS order regardless.
-        selected = select_cron_jobs("-run_mrp_auto_draft_job,-poll_tracking_job")
+        selected = select_cron_jobs("-run_mrp_review_job,-poll_tracking_job")
         expected = [n for n in _all_names() if n not in {MRP_CRON, "cron:poll_tracking_job"}]
         assert [job.name for job in selected] == expected
 
-        reversed_spec = select_cron_jobs("-poll_tracking_job,-run_mrp_auto_draft_job")
+        reversed_spec = select_cron_jobs("-poll_tracking_job,-run_mrp_review_job")
         assert [job.name for job in reversed_spec] == expected
 
     def test_two_exclusions_subtract_both(self):
         from app.worker import ALL_CRON_JOBS, select_cron_jobs
 
-        selected = select_cron_jobs("all,-run_mrp_auto_draft_job,-check_late_work_orders_job")
+        selected = select_cron_jobs("all,-run_mrp_review_job,-check_late_work_orders_job")
         names = [job.name for job in selected]
         assert len(names) == len(ALL_CRON_JOBS) - 2
         assert MRP_CRON not in names
@@ -488,9 +488,9 @@ class TestCronExclusions:
         from app.worker import ALL_CRON_JOBS, select_cron_jobs
 
         for spec in (
-            "-run_mrp_auto_draft_job,-run_mrp_auto_draft_job",
-            "-run_mrp_auto_draft_job,-cron:run_mrp_auto_draft_job",
-            "all,-cron:run_mrp_auto_draft_job,-run_mrp_auto_draft_job",
+            "-run_mrp_review_job,-run_mrp_review_job",
+            "-run_mrp_review_job,-cron:run_mrp_review_job",
+            "all,-cron:run_mrp_review_job,-run_mrp_review_job",
         ):
             selected = select_cron_jobs(spec)
             assert len(selected) == len(ALL_CRON_JOBS) - 1, spec
@@ -508,17 +508,17 @@ class TestCronExclusions:
     def test_whitespace_around_tokens_is_tolerated(self):
         from app.worker import select_cron_jobs
 
-        assert [j.name for j in select_cron_jobs("  all , -run_mrp_auto_draft_job  ")] == [
-            j.name for j in select_cron_jobs("all,-run_mrp_auto_draft_job")
+        assert [j.name for j in select_cron_jobs("  all , -run_mrp_review_job  ")] == [
+            j.name for j in select_cron_jobs("all,-run_mrp_review_job")
         ]
-        assert [j.name for j in select_cron_jobs(" -run_mrp_auto_draft_job , -poll_tracking_job ")] == [
-            j.name for j in select_cron_jobs("-run_mrp_auto_draft_job,-poll_tracking_job")
+        assert [j.name for j in select_cron_jobs(" -run_mrp_review_job , -poll_tracking_job ")] == [
+            j.name for j in select_cron_jobs("-run_mrp_review_job,-poll_tracking_job")
         ]
 
     def test_whitespace_between_the_dash_and_the_name_is_tolerated(self):
         """Tokens are stripped at their edges BEFORE the ``-`` is peeled, so a space left
         after the dash for legibility used to survive into the lookup key and produce
-        ``unknown cron job(s): - run_mrp_auto_draft_job`` -- a crash loop whose offending
+        ``unknown cron job(s): - run_mrp_review_job`` -- a crash loop whose offending
         token renders with an easily-missed leading space. Both the docstring and
         ENVIRONMENT_VARIABLES.md promise whitespace is ignored; this is the case that made
         that almost-true. The validator and the resolver must peel identically, so this also
@@ -526,8 +526,8 @@ class TestCronExclusions:
         ValueError for a KeyError at import)."""
         from app.worker import select_cron_jobs
 
-        expected = [j.name for j in select_cron_jobs("all,-run_mrp_auto_draft_job")]
-        for spec in ("all, - run_mrp_auto_draft_job", "- run_mrp_auto_draft_job", "-  cron:run_mrp_auto_draft_job"):
+        expected = [j.name for j in select_cron_jobs("all,-run_mrp_review_job")]
+        for spec in ("all, - run_mrp_review_job", "- run_mrp_review_job", "-  cron:run_mrp_review_job"):
             assert [j.name for j in select_cron_jobs(spec)] == expected, spec
 
     def test_excluding_a_coroutine_scheduled_twice_removes_every_instance(self):
@@ -537,31 +537,31 @@ class TestCronExclusions:
 
         Subtracting by that single object's id() removed only the LAST instance and left the
         earlier one armed, while ``startup()`` still logged "1 of 13 cron jobs SUPPRESSED ...
-        cron:run_mrp_auto_draft_job". Two contradictory lines in one startup log, the
+        cron:run_mrp_review_job". Two contradictory lines in one startup log, the
         reassuring one wrong, and the surviving instance was the 06:00 draft-PO/WO pass the
         owner was trying to switch off. Not reachable against today's ``ALL_CRON_JOBS`` (12
         distinct coroutines), which is exactly why it needs a test rather than a comment: the
         edit that makes it reachable is an ordinary one and would land silently."""
         from arq import cron
 
-        from app.worker import ALL_CRON_JOBS, run_mrp_auto_draft_job, select_cron_jobs
+        from app.worker import ALL_CRON_JOBS, run_mrp_review_job, select_cron_jobs
 
-        twice = list(ALL_CRON_JOBS) + [cron(run_mrp_auto_draft_job, hour=18, minute=0)]
+        twice = list(ALL_CRON_JOBS) + [cron(run_mrp_review_job, hour=18, minute=0)]
         assert len(twice) == len(ALL_CRON_JOBS) + 1
 
-        selected = select_cron_jobs("all,-run_mrp_auto_draft_job", available=twice)
+        selected = select_cron_jobs("all,-run_mrp_review_job", available=twice)
 
-        assert not any("run_mrp_auto_draft_job" in job.name for job in selected)
+        assert not any("run_mrp_review_job" in job.name for job in selected)
         assert len(selected) == len(ALL_CRON_JOBS) - 1
         # And the same holds for the bare/prefixed spellings of the exclusion.
-        for spec in ("-run_mrp_auto_draft_job", "-cron:run_mrp_auto_draft_job"):
-            assert not any("run_mrp_auto_draft_job" in j.name for j in select_cron_jobs(spec, available=twice)), spec
+        for spec in ("-run_mrp_review_job", "-cron:run_mrp_review_job"):
+            assert not any("run_mrp_review_job" in j.name for j in select_cron_jobs(spec, available=twice)), spec
 
     def test_the_all_base_token_is_case_insensitive_like_the_bare_keyword(self):
         from app.worker import select_cron_jobs
 
-        assert [j.name for j in select_cron_jobs("ALL,-run_mrp_auto_draft_job")] == [
-            j.name for j in select_cron_jobs("all,-run_mrp_auto_draft_job")
+        assert [j.name for j in select_cron_jobs("ALL,-run_mrp_review_job")] == [
+            j.name for j in select_cron_jobs("all,-run_mrp_review_job")
         ]
 
     def test_the_surviving_jobs_are_the_same_objects_not_copies(self):
@@ -570,7 +570,7 @@ class TestCronExclusions:
         make every armed cron read as suppressed."""
         from app.worker import ALL_CRON_JOBS, select_cron_jobs
 
-        selected = select_cron_jobs("all,-run_mrp_auto_draft_job")
+        selected = select_cron_jobs("all,-run_mrp_review_job")
         survivors = {id(job) for job in ALL_CRON_JOBS if job.name != MRP_CRON}
         assert {id(job) for job in selected} == survivors
 
@@ -585,7 +585,7 @@ class TestCronExclusions:
         message = str(exc.value)
         assert "-run_mrp_autodraft_job" in message
         assert "Known jobs:" in message
-        assert "run_mrp_auto_draft_job" in message  # the real name is in the listing
+        assert "run_mrp_review_job" in message  # the real name is in the listing
 
     def test_an_unknown_excluded_name_errors_even_with_an_explicit_all_base(self):
         from app.worker import select_cron_jobs
@@ -603,7 +603,7 @@ class TestCronExclusions:
             select_cron_jobs("-no_such_job")
         message = str(exc.value)
         assert "'-'" in message
-        assert "all,-run_mrp_auto_draft_job" in message
+        assert "all,-run_mrp_review_job" in message
 
 
 class TestAmbiguousCronSpecsAreRefused:
@@ -615,11 +615,11 @@ class TestAmbiguousCronSpecsAreRefused:
         from app.worker import select_cron_jobs
 
         with pytest.raises(ValueError) as exc:
-            select_cron_jobs("poll_tracking_job,-run_mrp_auto_draft_job")
+            select_cron_jobs("poll_tracking_job,-run_mrp_review_job")
         message = str(exc.value)
         # Names BOTH sides: the operator has to see which token was read as which.
         assert "poll_tracking_job" in message
-        assert "-run_mrp_auto_draft_job" in message
+        assert "-run_mrp_review_job" in message
         # And states the two legal shapes rather than leaving them to guess again.
         assert "'a,b'" in message
         assert "'all,-a'" in message or "'-a'" in message
@@ -628,23 +628,23 @@ class TestAmbiguousCronSpecsAreRefused:
         from app.worker import select_cron_jobs
 
         with pytest.raises(ValueError):
-            select_cron_jobs("-run_mrp_auto_draft_job,poll_tracking_job")
+            select_cron_jobs("-run_mrp_review_job,poll_tracking_job")
 
     def test_mixing_is_refused_with_the_cron_prefixed_spelling_too(self):
         from app.worker import select_cron_jobs
 
         with pytest.raises(ValueError):
-            select_cron_jobs("cron:poll_tracking_job,-cron:run_mrp_auto_draft_job")
+            select_cron_jobs("cron:poll_tracking_job,-cron:run_mrp_review_job")
 
     def test_none_combined_with_an_exclusion_is_an_error(self):
         """Contradictory: ``none`` already arms nothing, so there is nothing to subtract."""
         from app.worker import select_cron_jobs
 
         with pytest.raises(ValueError) as exc:
-            select_cron_jobs("none,-run_mrp_auto_draft_job")
+            select_cron_jobs("none,-run_mrp_review_job")
         message = str(exc.value)
         assert "none" in message
-        assert "-run_mrp_auto_draft_job" in message
+        assert "-run_mrp_review_job" in message
 
     def test_a_bare_minus_is_refused_as_an_unknown_name(self):
         """Not a documented shape; recorded here because the behavior an operator hits has to
@@ -662,8 +662,8 @@ class TestAmbiguousCronSpecsAreRefused:
         from app.worker import select_cron_jobs
 
         with pytest.raises(ValueError) as exc:
-            select_cron_jobs("--run_mrp_auto_draft_job")
-        assert "-run_mrp_auto_draft_job" in str(exc.value)
+            select_cron_jobs("--run_mrp_review_job")
+        assert "-run_mrp_review_job" in str(exc.value)
 
     def test_negating_a_keyword_is_refused_rather_than_reinterpreted(self):
         """``"-all"`` could be read as "subtract everything" (i.e. ``none``) and ``"-none"``
@@ -689,7 +689,7 @@ class TestTheOwnersMrpCutover:
 
         assert len(selected) == 14
         assert len(ALL_CRON_JOBS) == 15
-        assert "run_mrp_auto_draft_job" not in names
+        assert "run_mrp_review_job" not in names
         assert names == {
             "send_daily_digest_job",
             "check_calibrations_job",
@@ -722,7 +722,7 @@ class TestTheOwnersMrpCutover:
         assert {id(job) for job in by_allowlist} < {id(job) for job in by_exclusion}
 
     def test_turning_the_cron_off_does_not_unregister_the_job_function(self, monkeypatch: pytest.MonkeyPatch):
-        """MRP stays runnable on demand (the API enqueues ``run_mrp_auto_draft_job``); only
+        """MRP stays runnable on demand (the API enqueues ``run_mrp_review_job``); only
         the 06:00 schedule goes away. Losing the function would turn an operational pause
         into a broken feature."""
         import importlib
@@ -734,7 +734,7 @@ class TestTheOwnersMrpCutover:
         try:
             assert len(worker.WorkerSettings.cron_jobs) == 14
             assert MRP_CRON not in [job.name for job in worker.WorkerSettings.cron_jobs]
-            assert worker.run_mrp_auto_draft_job in worker.WorkerSettings.functions
+            assert worker.run_mrp_review_job in worker.WorkerSettings.functions
         finally:
             monkeypatch.delenv("WORKER_CRON_JOBS", raising=False)
             importlib.reload(worker)
@@ -796,7 +796,7 @@ class TestExclusionsSurviveANewCronBeingAdded:
         from app.worker import select_cron_jobs
 
         extended = _schedule_with_one_more_cron()
-        selected = select_cron_jobs("-run_mrp_auto_draft_job", available=extended)
+        selected = select_cron_jobs("-run_mrp_review_job", available=extended)
         assert "cron:newly_added_cron_job" in [job.name for job in selected]
 
     def test_the_new_cron_can_itself_be_excluded_by_name(self):
