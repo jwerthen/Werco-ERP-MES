@@ -210,6 +210,18 @@ class TestMembership:
         assert by_key[("GET", "/api/v1/admin/settings/shipping-profile")] == "get_shipping_profile"
         assert by_key[("GET", "/api/v1/receiving/print-profile")] == "get_print_profile"
 
+    def test_shipping_over_open_quality_items_has_no_tool_door(self, catalog):
+        """shipping/2: accepting open quality items is a person's judgment. Issuing the CoC is
+        excluded outright; the ship route stays an agent action only through the convenience
+        ``mark_shipped``, whose schema has no acknowledgment and which sends no body, so a job
+        with open items comes back as the route's 409. The raw twin is shadowed."""
+        ship = ("POST", "/api/v1/shipping/{shipment_id}/ship")
+        assert ship in SHADOWED_OPERATIONS
+        assert ship not in {tool.key for tool in catalog}
+        tool = next(tool for tool in CONVENIENCE_TOOLS if tool.name == "mark_shipped")
+        assert set(tool.input_schema["properties"]) == {"shipment_id", "tracking_number"}
+        assert tool.input_schema.get("additionalProperties") is False
+
     def test_writing_a_comment_or_changing_a_watch_is_never_a_tool(self, catalog):
         """Owner decision 2026-11-16: a comment is a person's own words. The routes refuse every
         API token, but a person's own JWT reaches a tool -- so the writes are not tools at all.

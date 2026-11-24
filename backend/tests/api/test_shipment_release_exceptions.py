@@ -91,8 +91,12 @@ def make_blocker(db: Session, wo, *, category: str = "quality_hold", status_: st
         (NCRStatus.OPEN, NCRDisposition.REPAIR, True),
         (NCRStatus.CLOSED, NCRDisposition.REWORK, False),
         (NCRStatus.CLOSED, NCRDisposition.USE_AS_IS, False),
-        (NCRStatus.OPEN, NCRDisposition.SCRAP, False),
-        (NCRStatus.OPEN, NCRDisposition.RETURN_TO_VENDOR, False),
+        # Scrap / return-to-vendor count until CLOSED: an unbooked scrap is still in the
+        # job's completed quantity, and closing the NCR is the record it was carried out.
+        (NCRStatus.OPEN, NCRDisposition.SCRAP, True),
+        (NCRStatus.PENDING_DISPOSITION, NCRDisposition.RETURN_TO_VENDOR, True),
+        (NCRStatus.CLOSED, NCRDisposition.SCRAP, False),
+        (NCRStatus.CLOSED, NCRDisposition.RETURN_TO_VENDOR, False),
         (NCRStatus.VOID, NCRDisposition.PENDING, False),
     ],
 )

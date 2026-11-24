@@ -99,3 +99,26 @@ test('a withheld certificate says Quality is to issue it, and there is nothing t
   expect(await screen.findByText('Withheld, Quality to issue')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Print certificate' })).not.toBeInTheDocument();
 });
+
+test('a packed shipment with open quality items does not promise a certificate at ship', async () => {
+  mocked.getShipment.mockResolvedValue({
+    ...shipment,
+    status: 'packed',
+    ship_date: null,
+    coc_number: null,
+    coc_issued_at: null,
+    release_exceptions: [
+      {
+        code: 'open_ncr',
+        severity: 'high',
+        message: 'NCR-0007 is not dispositioned',
+        reference_type: 'ncr',
+        reference_id: 7,
+      },
+    ],
+  });
+  view();
+
+  expect(await screen.findByText('Withheld until Quality accepts 1 open quality item(s)')).toBeInTheDocument();
+  expect(screen.queryByText('Issued at ship when required')).not.toBeInTheDocument();
+});

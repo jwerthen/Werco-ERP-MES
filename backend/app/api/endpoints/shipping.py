@@ -55,6 +55,7 @@ from app.services.coc_service import (
     coc_required_for_shipment,
     cocs_by_shipment,
     generate_coc_for_shipment,
+    issue_coc_for_shipment,
     record_coc_withheld,
     render_coc_pdf,
     withheld_shipment_ids,
@@ -175,30 +176,37 @@ def list_shipments(
     cocs = cocs_by_shipment(db, company_id, [s.id for s in shipments])
     withheld = withheld_shipment_ids(db, company_id, [s.id for s in shipments if s.id not in cocs])
 
-    result = []
-    for s in shipments:
-        coc = cocs.get(s.id)
-        result.append(
-            ShipmentResponse(
-                id=s.id,
-                shipment_number=s.shipment_number,
-                work_order_id=s.work_order_id,
-                work_order_number=s.work_order.work_order_number if s.work_order else None,
-                customer_name=s.work_order.customer_name if s.work_order else None,
-                part_number=s.work_order.part.part_number if s.work_order and s.work_order.part else None,
-                status=s.status.value if hasattr(s.status, 'value') else s.status,
-                ship_to_name=s.ship_to_name,
-                carrier=s.carrier,
-                tracking_number=s.tracking_number,
-                quantity_shipped=s.quantity_shipped,
-                ship_date=s.ship_date,
-                created_at=s.created_at,
-                coc_number=coc.coc_number if coc else None,
-                coc_issued_at=coc.issued_at if coc else None,
-                coc_withheld=coc is None and s.id in withheld,
-            )
-        )
-    return result
+    return [_shipment_response(s, cocs.get(s.id), s.id in withheld) for s in shipments]
+
+
+def _shipment_response(shipment: Shipment, coc: Optional[CertificateOfConformance], withheld: bool) -> ShipmentResponse:
+    """The one ShipmentResponse builder (list, create, update), so the CoC fields never drift."""
+    wo = shipment.work_order
+    return ShipmentResponse(
+        id=shipment.id,
+        shipment_number=shipment.shipment_number,
+        work_order_id=shipment.work_order_id,
+        work_order_number=wo.work_order_number if wo else None,
+        customer_name=wo.customer_name if wo else None,
+        part_number=wo.part.part_number if wo and wo.part else None,
+        status=shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
+        ship_to_name=shipment.ship_to_name,
+        carrier=shipment.carrier,
+        tracking_number=shipment.tracking_number,
+        quantity_shipped=shipment.quantity_shipped,
+        ship_date=shipment.ship_date,
+        created_at=shipment.created_at,
+        coc_number=coc.coc_number if coc else None,
+        coc_issued_at=coc.issued_at if coc else None,
+        coc_withheld=coc is None and withheld,
+    )
+
+
+def _shipment_response_for(db: Session, company_id: int, shipment: Shipment) -> ShipmentResponse:
+    """Single-shipment response with its CoC number / withheld state read the same way the list reads them."""
+    coc = cocs_by_shipment(db, company_id, [shipment.id]).get(shipment.id)
+    withheld = coc is None and shipment.id in withheld_shipment_ids(db, company_id, [shipment.id])
+    return _shipment_response(shipment, coc, withheld)
 
 
 @router.get("/ready-to-ship")
@@ -230,16 +238,18 @@ def get_ready_to_ship(
         .order_by(WorkOrder.due_date)
         .all()
     )
-    shippable_ids = [
-        wo.id for wo in work_orders if float(wo.quantity_complete or 0) - float(allocations.get(wo.id) or 0) > 0
-    ]
-    open_items = shipment_release_exceptions(db, company_id, shippable_ids)
+    remaining_by_wo = {
+        wo.id: max(0, float(wo.quantity_complete or 0) - float(allocations.get(wo.id) or 0)) for wo in work_orders
+    }
+    open_items = shipment_release_exceptions(
+        db, company_id, [wo_id for wo_id, remaining in remaining_by_wo.items() if remaining > 0]
+    )
     result = []
     for wo in work_orders:
         completed = float(wo.quantity_complete or 0)
         allocated = float(allocations.get(wo.id) or 0)
         shipped = float(dispatched.get(wo.id) or 0)
-        remaining = max(0, completed - allocated)
+        remaining = remaining_by_wo[wo.id]
         if remaining > 0:
             result.append(
                 {
@@ -316,6 +326,7 @@ def get_shipment(
         "coc_number": coc.coc_number if coc else None,
         "coc_issued_at": to_utc_iso(coc.issued_at) if coc else None,
         "coc_withheld": coc is None and shipment.id in withheld_shipment_ids(db, company_id, [shipment.id]),
+        # (``and`` short-circuits: the audit-log read runs only when no certificate exists.)
         "release_exceptions": [
             exc.as_dict()
             for exc in shipment_release_exceptions(db, company_id, [shipment.work_order_id]).get(
@@ -335,25 +346,10 @@ def create_shipment(
 ):
     """Create a new shipment"""
     shipment = create_shipment_command(db, current_user, company_id, shipment_in, audit)
-    wo = db.get(WorkOrder, shipment.work_order_id)
     db.commit()
     db.refresh(shipment)
 
-    return ShipmentResponse(
-        id=shipment.id,
-        shipment_number=shipment.shipment_number,
-        work_order_id=shipment.work_order_id,
-        work_order_number=wo.work_order_number,
-        customer_name=wo.customer_name,
-        part_number=wo.part.part_number if wo.part else None,
-        status=shipment.status.value,
-        ship_to_name=shipment.ship_to_name,
-        carrier=shipment.carrier,
-        tracking_number=shipment.tracking_number,
-        quantity_shipped=shipment.quantity_shipped,
-        ship_date=shipment.ship_date,
-        created_at=shipment.created_at,
-    )
+    return _shipment_response_for(db, company_id, shipment)
 
 
 @router.post("/{shipment_id}/ship")
@@ -721,22 +717,7 @@ def update_shipment(
     db.commit()
     db.refresh(shipment)
 
-    wo = shipment.work_order
-    return ShipmentResponse(
-        id=shipment.id,
-        shipment_number=shipment.shipment_number,
-        work_order_id=shipment.work_order_id,
-        work_order_number=wo.work_order_number if wo else None,
-        customer_name=wo.customer_name if wo else None,
-        part_number=wo.part.part_number if wo and wo.part else None,
-        status=shipment.status.value if hasattr(shipment.status, 'value') else shipment.status,
-        ship_to_name=shipment.ship_to_name,
-        carrier=shipment.carrier,
-        tracking_number=shipment.tracking_number,
-        quantity_shipped=shipment.quantity_shipped,
-        ship_date=shipment.ship_date,
-        created_at=shipment.created_at,
-    )
+    return _shipment_response_for(db, company_id, shipment)
 
 
 def _coc_for_shipment(db: Session, shipment_id: int, company_id: int) -> Optional[CertificateOfConformance]:
@@ -791,7 +772,7 @@ def issue_certificate_of_conformance(
         current_user, acknowledgment, exceptions, message=COC_OVER_EXCEPTIONS_MESSAGE
     )
 
-    coc = generate_coc_for_shipment(
+    coc, created = issue_coc_for_shipment(
         db,
         shipment=shipment,
         company_id=company_id,
@@ -799,6 +780,11 @@ def issue_certificate_of_conformance(
         audit=audit,
         accepted_exceptions=exceptions or None,
     )
+    if not created:
+        # A concurrent issuer won the uq_coc_company_shipment race: hand back THEIR
+        # certificate, exactly as the early ``existing`` branch does. Recording this
+        # caller's acceptance against it would name two issuers for one certificate.
+        return CertificateOfConformanceResponse.model_validate(coc)
     if exceptions:
         with required_audit(db, COC_ACCEPTANCE_AUDIT_UNAVAILABLE):
             audit.log_required(

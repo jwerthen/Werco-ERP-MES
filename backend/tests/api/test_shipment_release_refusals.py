@@ -32,7 +32,7 @@ from app.models.shipping import CertificateOfConformance, Shipment, ShipmentStat
 from app.models.user import UserRole
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.services.audit_service import AuditService, AuditWriteError
-from app.services.coc_service import withheld_shipment_ids
+from app.services.coc_service import issue_coc_for_shipment, withheld_shipment_ids
 from app.services.quality_gate_service import latest_fais_by_work_order
 from app.services.shipment_release_service import (
     can_acknowledge_release_exceptions,
@@ -465,3 +465,77 @@ def test_latest_first_article_ties_break_by_id(db_session: Session):
 
     latest = latest_fais_by_work_order(db_session, COMPANY_A, [wo.id])[wo.id]
     assert [f.id for f in latest] == [rows[1].id]
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: the issue race, and PUT / POST carrying the CoC fields.
+# ---------------------------------------------------------------------------
+
+
+def test_issue_service_reports_whether_this_call_created_the_certificate(db_session: Session):
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    wo = make_wo(db_session, make_part(db_session))
+    shipment = make_shipment(db_session, wo, status_=ShipmentStatus.SHIPPED, ship_date=date.today())
+    db_session.commit()
+    audit = AuditService(db_session, quality)
+
+    first, created_first = issue_coc_for_shipment(
+        db_session, shipment=shipment, company_id=COMPANY_A, user_id=quality.id, audit=audit
+    )
+    second, created_second = issue_coc_for_shipment(
+        db_session, shipment=shipment, company_id=COMPANY_A, user_id=quality.id, audit=audit
+    )
+
+    assert (created_first, created_second) == (True, False)
+    assert second.id == first.id
+
+
+def test_losing_the_issue_race_records_no_acceptance_against_the_winners_certificate(
+    client: TestClient, db_session: Session
+):
+    """Two Quality users issue over the same open items at once. The loser's route passed
+    the ``existing`` check before the winner committed, so its mint hands back the winner's
+    certificate. The loser must not write COC_ISSUED_OVER_EXCEPTIONS against it."""
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    winner_user = make_user(db_session, role=UserRole.QUALITY)
+    loser_user = make_user(db_session, role=UserRole.QUALITY)
+    _wo, _ncr, shipment = _job_with_open_ncr(db_session)
+    assert client.post(_ship_url(shipment), json=ACK, headers=headers_for(manager)).status_code == 200
+    won = client.post(_coc_url(shipment), json={**ACK, "reason": "Winner accepts"}, headers=headers_for(winner_user))
+    assert won.status_code == status.HTTP_200_OK, won.text
+    issued_rows = [r for r in _release_audit_rows(db_session) if r.action == "COC_ISSUED_OVER_EXCEPTIONS"]
+    assert len(issued_rows) == 1
+
+    # The loser's early existence check misses (the race window); the mint then finds the winner.
+    with patch("app.api.endpoints.shipping._coc_for_shipment", return_value=None):
+        lost = client.post(_coc_url(shipment), json={**ACK, "reason": "Loser accepts"}, headers=headers_for(loser_user))
+
+    assert lost.status_code == status.HTTP_200_OK, lost.text
+    assert lost.json()["coc_number"] == won.json()["coc_number"]
+    assert len(_coc_rows(db_session, shipment.id)) == 1
+    issued_rows = [r for r in _release_audit_rows(db_session) if r.action == "COC_ISSUED_OVER_EXCEPTIONS"]
+    assert [r.user_id for r in issued_rows] == [winner_user.id]
+
+
+def test_put_response_carries_the_certificate_and_the_withheld_state(client: TestClient, db_session: Session):
+    manager = make_user(db_session, role=UserRole.MANAGER)
+    quality = make_user(db_session, role=UserRole.QUALITY)
+    _wo, _ncr, withheld = _job_with_open_ncr(db_session)
+    assert client.post(_ship_url(withheld), json=ACK, headers=headers_for(manager)).status_code == 200
+
+    delivered = client.put(
+        f"/api/v1/shipping/{withheld.id}", json={"status": "delivered"}, headers=headers_for(manager)
+    )
+    assert delivered.status_code == status.HTTP_200_OK, delivered.text
+    assert (delivered.json()["coc_number"], delivered.json()["coc_withheld"]) == (None, True)
+
+    issued = client.post(_coc_url(withheld), json=ACK, headers=headers_for(quality))
+    assert issued.status_code == status.HTTP_200_OK, issued.text
+    edited = client.put(
+        f"/api/v1/shipping/{withheld.id}", json={"tracking_number": "1Z-REVIEW-2"}, headers=headers_for(manager)
+    )
+    assert edited.status_code == status.HTTP_200_OK, edited.text
+    body = edited.json()
+    assert body["coc_number"] == issued.json()["coc_number"]
+    assert body["coc_issued_at"] is not None
+    assert body["coc_withheld"] is False

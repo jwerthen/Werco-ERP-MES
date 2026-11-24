@@ -562,6 +562,7 @@ _SCENARIOS: Dict[str, List[Dict[str, Any]]] = {
     "list_purchase_orders": [{}],
     "list_quality_ncrs": [{}],
     "list_parts": [{}],
+    "mark_shipped": [{"shipment_id": 7}, {"shipment_id": 7, "tracking_number": "1Z999"}],
 }
 
 

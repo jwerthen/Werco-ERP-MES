@@ -121,6 +121,12 @@ confirmed with them. See
 [API.md → Maintenance](API.md#maintenance-pm-schedules-maintenance-work-orders-event-log), *Maintenance
 log entries*.
 
+**Re-checked again on 2026-11-23 after shipping over open quality items (shipping/2)**: issuing a
+Certificate of Conformance (`POST /shipping/{id}/coc`) left the catalog (`EXCLUDED_OPERATIONS`,
+§6.1), and `mark_shipped` became a **convenience** tool under the same name (§7), shadowing its raw
+route (§8), so an agent can ship but can never send the acknowledgment that accepts open quality
+items: 16 convenience + **778** generated, 17 shadowed. No existing name shifted.
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -1045,7 +1051,7 @@ function name containing `delete`/`void`/`cancel`/`purge`/`reset`/`hard`; `idemp
 
 ## 7. The convenience tools (fixed names)
 
-Fifteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
+Sixteen hand-written tools, listed **first** in `tools/list` (then the generated catalog sorted by
 name). Each one reaches data exactly like a generated tool — an HTTP request through the executor
 as the caller — and each **shadows** the raw route(s) it fronts (§8), so there is exactly one door
 to those routes and the rules below cannot be bypassed by calling the raw twin. Every convenience
@@ -1069,6 +1075,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `list_purchase_orders` | `GET /purchasing/purchase-orders` | `status`, `vendor_id`, `deleted_only`, `limit` (default 200), `offset` | |
 | `list_quality_ncrs` | `GET /quality/ncr` | `status`, `part_id`, `skip`, `limit` (default 100) | |
 | `list_parts` | `GET /parts/` | `search`, `part_type`, `item_group` (default `engineering`), `active_only`, `include_bom_components`, `include_deleted` (admin), `skip`, `limit` (default 100, max 500) | |
+| `mark_shipped` | `POST /shipping/{id}/ship` | `shipment_id` (required), `tracking_number` | Ships with **no request body, ever**: the acknowledgment that accepts open quality items (an open NCR, a first article not passed, a quality hold) is a person's decision in the app. A job with open items comes back as the route's **409** listing them, as an `is_error` result |
 
 **Operation-name guard (`add_operation`).** An operation is a short shop-floor step (`Laser`,
 `Brake`, `Weld`, `Deburr`), never a file. A name is refused — **422, not rewritten** — when it
@@ -1080,7 +1087,7 @@ contains `/` or `\`, ends with `.dxf` / `.dwg` / `.nc` / `.pdf` (case-insensitiv
 
 ## 8. Shadowed raw operations
 
-These 16 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
+These 17 `(METHOD, path)` pairs are **dropped from the generated catalog**; the convenience tool is
 the only door to them (`convenience.SHADOWED_OPERATIONS`):
 
 | Raw operation | Replaced by |
@@ -1101,6 +1108,7 @@ the only door to them (`convenience.SHADOWED_OPERATIONS`):
 | `GET /api/v1/purchasing/purchase-orders` | `list_purchase_orders` |
 | `GET /api/v1/quality/ncr` | `list_quality_ncrs` |
 | `GET /api/v1/parts/` | `list_parts` |
+| `POST /api/v1/shipping/{shipment_id}/ship` | `mark_shipped` |
 
 Every other operation stays generated — including the neighbours of the shadowed ones
 (`work_orders_start_work_order`, `work_orders_update_operation`, `preview_laser_nest_package_import`,

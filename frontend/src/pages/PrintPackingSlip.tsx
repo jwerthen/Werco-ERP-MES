@@ -26,8 +26,14 @@ function certificateLine(shipment: ShipmentDetail): string {
       : shipment.coc_number;
   }
   if (shipment.coc_withheld) return 'Withheld, Quality to issue';
-  // Required when the shipment asks for one or the customer requires it (server rule).
-  if (shipment.status === 'pending' || shipment.status === 'packed') return 'Issued at ship when required';
+  if (shipment.status === 'pending' || shipment.status === 'packed') {
+    // Open quality items on the job: the server withholds the automatic certificate at
+    // ship, so the slip must not promise one.
+    const open = shipment.release_exceptions?.length ?? 0;
+    if (open > 0) return `Withheld until Quality accepts ${open} open quality item(s)`;
+    // Required when the shipment asks for one or the customer requires it (server rule).
+    return 'Issued at ship when required';
+  }
   return 'Not issued';
 }
 
@@ -65,10 +71,7 @@ export default function PrintPackingSlip() {
   if (loadError && !loading) {
     return (
       <div className="p-8 max-w-4xl mx-auto">
-        <ErrorState
-          message="Could not load this shipment."
-          onRetry={loadShipment}
-        />
+        <ErrorState message="Could not load this shipment." onRetry={loadShipment} />
       </div>
     );
   }
@@ -108,9 +111,7 @@ export default function PrintPackingSlip() {
         <div className="border p-4">
           <h3 className="font-bold text-sm text-gray-500 mb-2">SHIP TO:</h3>
           <p className="font-medium text-lg">{shipment.ship_to_name || shipment.customer_name}</p>
-          {shipment.ship_to_address && (
-            <p className="whitespace-pre-line text-sm">{shipment.ship_to_address}</p>
-          )}
+          {shipment.ship_to_address && <p className="whitespace-pre-line text-sm">{shipment.ship_to_address}</p>}
           {cityStateZip(shipment) && <p className="text-sm">{cityStateZip(shipment)}</p>}
         </div>
         <div className="border p-4">

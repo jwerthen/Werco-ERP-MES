@@ -56,6 +56,10 @@ describe('permissions utility', () => {
       expect(hasPermission('quality', 'quality:view')).toBe(true);
       expect(hasPermission('quality', 'quality:inspect')).toBe(true);
       expect(hasPermission('quality', 'quality:approve')).toBe(true);
+      // shipping/2: Quality reaches the Shipping list and the packing slip, read only.
+      expect(hasPermission('quality', 'shipping:view')).toBe(true);
+      expect(hasPermission('quality', 'shipping:create')).toBe(false);
+      expect(hasPermission('quality', 'shipping:complete')).toBe(false);
     });
 
     it('handles shipping role permissions', () => {
@@ -96,13 +100,13 @@ describe('permissions utility', () => {
     // Mirrors the backend inspect endpoint's role gate
     // (admin / manager / supervisor / quality).
     it('grants inspect to admin, manager, supervisor, and quality', () => {
-      (['platform_admin', 'admin', 'manager', 'supervisor', 'quality'] as const).forEach((role) => {
+      (['platform_admin', 'admin', 'manager', 'supervisor', 'quality'] as const).forEach(role => {
         expect(hasPermission(role, 'receiving:inspect')).toBe(true);
       });
     });
 
     it('denies inspect to operator, shipping, and viewer', () => {
-      (['operator', 'shipping', 'viewer'] as const).forEach((role) => {
+      (['operator', 'shipping', 'viewer'] as const).forEach(role => {
         expect(hasPermission(role, 'receiving:inspect')).toBe(false);
       });
     });
@@ -246,11 +250,11 @@ describe('permissions utility', () => {
   describe('userCanReleaseWorkOrders', () => {
     // Mirrors require_role([ADMIN, MANAGER, SUPERVISOR]) on POST /work-orders/{id}/release
     // and POST /work-orders/bulk-release (platform admin / superuser pass require_role).
-    it.each(['admin', 'manager', 'supervisor', 'platform_admin'] as const)('allows %s', (role) => {
+    it.each(['admin', 'manager', 'supervisor', 'platform_admin'] as const)('allows %s', role => {
       expect(userCanReleaseWorkOrders({ role })).toBe(true);
     });
 
-    it.each(['operator', 'quality', 'shipping', 'viewer'] as const)('refuses %s', (role) => {
+    it.each(['operator', 'quality', 'shipping', 'viewer'] as const)('refuses %s', role => {
       expect(userCanReleaseWorkOrders({ role, is_superuser: false })).toBe(false);
     });
 

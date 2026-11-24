@@ -26,7 +26,7 @@ Design rules (mirror ``completion_inventory_service``):
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -139,6 +139,35 @@ def generate_coc_for_shipment(
 ) -> CertificateOfConformance:
     """Mint (or return the existing) CoC for a shipment. Idempotent; does NOT commit.
 
+    Thin wrapper over :func:`issue_coc_for_shipment` for callers that do not need to
+    know whether THIS call created the row.
+    """
+    coc, _created = issue_coc_for_shipment(
+        db,
+        shipment=shipment,
+        company_id=company_id,
+        user_id=user_id,
+        audit=audit,
+        accepted_exceptions=accepted_exceptions,
+    )
+    return coc
+
+
+def issue_coc_for_shipment(
+    db: Session,
+    *,
+    shipment: Shipment,
+    company_id: int,
+    user_id: int,
+    audit: AuditService,
+    accepted_exceptions: Optional[List[dict]] = None,
+) -> Tuple[CertificateOfConformance, bool]:
+    """Mint (or return the existing) CoC for a shipment, and say whether THIS call minted it.
+
+    ``created`` is False when a certificate already existed or a concurrent issuer won the
+    ``uq_coc_company_shipment`` race; the caller must then not record its own acceptance
+    against someone else's certificate. Idempotent; does NOT commit.
+
     ``accepted_exceptions`` (shipping/2) are the open quality items the issuer accepted
     on a manual issue over them; they are frozen into the snapshot as
     ``accepted_release_exceptions`` (never printed on the customer's certificate).
@@ -150,7 +179,7 @@ def generate_coc_for_shipment(
     """
     existing = _existing_coc(db, shipment.id, company_id)
     if existing is not None:
-        return existing
+        return existing, False
 
     wo = _resolve_work_order(db, shipment, company_id)
     part: Optional[Part] = None
@@ -244,7 +273,7 @@ def generate_coc_for_shipment(
         nested.rollback()
         winner = _existing_coc(db, shipment.id, company_id)
         if winner is not None:
-            return winner
+            return winner, False
         # Re-raise if the collision wasn't the shipment-uniqueness race we expected.
         raise
 
@@ -260,7 +289,7 @@ def generate_coc_for_shipment(
     # the CoC flag (and a later re-ship's coc_required check short-circuits to True).
     shipment.cert_of_conformance = True
 
-    return coc
+    return coc, True
 
 
 COC_WITHHELD_AUDIT_ACTION = "COC_WITHHELD"

@@ -328,8 +328,6 @@ def evaluate_completion_quality_exceptions(
 # the NCR counts until it is CLOSED. SCRAP and RETURN_TO_VENDOR take the pieces out of
 # the shipment, so an NCR so dispositioned never holds the certificate back, even while
 # its paperwork is still open.
-_SHIP_IN_PRODUCT_DISPOSITIONS = (NCRDisposition.REWORK, NCRDisposition.REPAIR, NCRDisposition.USE_AS_IS)
-
 SHIPMENT_RELEASE_EXCEPTION_CODES = ("open_ncr", "fai_not_passed", "open_blocker")
 
 
@@ -337,16 +335,21 @@ def ncr_holds_shipment(ncr: NonConformanceReport) -> bool:
     """True when this NCR holds a shipment's automatic certificate back.
 
     VOID never counts. An NCR not yet dispositioned (PENDING / NULL) counts whatever its
-    status. Rework, repair or use-as-is counts until the NCR is CLOSED. Scrap and
-    return-to-vendor never count -- the pieces are not in the shipment.
+    status. Every other disposition -- rework, repair, use-as-is, and also scrap and
+    return-to-vendor -- counts until the NCR is CLOSED.
+
+    Scrap / return-to-vendor are deliberately NOT exempt on disposition alone: nothing
+    links an NCR to the scrap booked against its job, so "dispositioned scrap" cannot
+    tell whether the pieces actually left the job's completed quantity. Closing the NCR
+    is the record that the disposition was carried out. (Narrower than the plan's "scrap
+    NCRs whose pieces are already scrapped do not count" until such a link exists; an
+    owner-visible default, and never a hard stop -- Quality may accept it with a reason.)
     """
     if ncr.status == NCRStatus.VOID:
         return False
     if ncr.disposition is None or ncr.disposition == NCRDisposition.PENDING:
         return True
-    if ncr.disposition in _SHIP_IN_PRODUCT_DISPOSITIONS:
-        return ncr.status != NCRStatus.CLOSED
-    return False
+    return ncr.status != NCRStatus.CLOSED
 
 
 def shipment_release_exceptions(
