@@ -664,6 +664,22 @@ export const smsPhoneSchema = z.object({
     }),
 });
 
+/**
+ * My Settings → change your own password. The new password is held to the same
+ * length + blocklist policy as the server (`validate_password_strength`); the
+ * server stays the enforcement and its 422 detail is shown verbatim if it differs.
+ */
+export const changeOwnPasswordSchema = z
+  .object({
+    current_password: z.string().min(1, 'Enter your current password'),
+    new_password: passwordStrengthSchema,
+    confirm_password: z.string().min(1, 'Re-enter the new password'),
+  })
+  .refine((data) => data.new_password === data.confirm_password, {
+    path: ['confirm_password'],
+    error: 'The two new passwords do not match',
+  });
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -687,3 +703,4 @@ export type VendorFormData = z.infer<typeof vendorSchema>;
 export type VisitorManualEntryFormData = z.output<typeof visitorManualEntrySchema>;
 export type VisitorManualEntryFormInput = z.input<typeof visitorManualEntrySchema>;
 export type SmsPhoneFormData = z.infer<typeof smsPhoneSchema>;
+export type ChangeOwnPasswordFormData = z.infer<typeof changeOwnPasswordSchema>;

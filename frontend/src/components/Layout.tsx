@@ -808,6 +808,15 @@ export default function Layout({ children }: LayoutProps) {
                 {user?.role?.replace('_', ' ')}
               </p>
             </div>
+            {/* My Settings (password, text alerts) — self-scoped, every signed-in role. */}
+            <Link
+              to="/settings"
+              className="p-1.5 rounded-[3px] text-fd-mute hover:text-fd-ink hover:bg-white/5 transition-all duration-150"
+              title="My Settings"
+              aria-label="My Settings"
+            >
+              <Cog6ToothIcon className="h-[18px] w-[18px]" aria-hidden="true" />
+            </Link>
             <button
               onClick={() => {
                 if (isShopFloorKiosk) {
