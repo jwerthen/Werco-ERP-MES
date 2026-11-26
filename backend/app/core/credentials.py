@@ -162,6 +162,19 @@ API_TOKEN_COMMENT_WRITE = (
     "watching a record. Sign in to the app."
 )
 
+# Routing changes on a released job (owner decision 2026-11-25): skipping a step, restoring one,
+# resequencing, and -- on a work order that is no longer a DRAFT -- adding a step each need a reason a
+# person typed, so every one of those writes refuses ANY API token 403 with this text before it writes
+# anything (editing a step's content on a released job needs ``change_reason`` but is not token-fenced)
+# (``app.services.routing_change_service``). Adding a step to a DRAFT work order is unchanged
+# (the plan is still being built, and ``create_work_order`` + ``add_operation`` is the agent
+# path). A crew-station badge token never reaches these routes (its path fence keeps it on the
+# shop floor).
+API_TOKEN_ROUTING_CHANGE = (
+    "Changing a released work order's routing (skipping, restoring, adding or reordering a step) is a "
+    "person's judgment and needs their reason: do it signed in to the app, not with an API token."
+)
+
 # The Hank task kinds only a PERSON may run, because each posts a person's own words (owner decision
 # for work-order comments, 2026-11-16): ``add_note`` posts a work-order comment. Two gates read this
 # one set, at the two doors an automated caller could use:

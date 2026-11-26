@@ -642,16 +642,26 @@ def test_generic_operation_put_start_on_a_released_work_order_still_lands_positi
         # not a start, and every start verb still refuses it until the work order resumes.
         (WorkOrderStatus.ON_HOLD, OperationStatus.ON_HOLD, {"status": "ready"}, OperationStatus.READY),
         # Ordinary edits on a draft are not status writes at all.
-        (WorkOrderStatus.DRAFT, OperationStatus.PENDING, {"name": "Renamed"}, OperationStatus.PENDING),
+        (
+            WorkOrderStatus.DRAFT,
+            OperationStatus.PENDING,
+            {"name": "Renamed", "change_reason": "routing test edit"},
+            OperationStatus.PENDING,
+        ),
         # Echoing the CURRENT status in an unrelated edit is not a transition -- running labor
         # on a held job keeps being editable.
         (
             WorkOrderStatus.ON_HOLD,
             OperationStatus.IN_PROGRESS,
-            {"status": "in_progress", "name": "Renamed"},
+            {"status": "in_progress", "name": "Renamed", "change_reason": "routing test edit"},
             OperationStatus.IN_PROGRESS,
         ),
-        (WorkOrderStatus.DRAFT, OperationStatus.READY, {"status": "ready", "name": "Renamed"}, OperationStatus.READY),
+        (
+            WorkOrderStatus.DRAFT,
+            OperationStatus.READY,
+            {"status": "ready", "name": "Renamed", "change_reason": "routing test edit"},
+            OperationStatus.READY,
+        ),
     ],
 )
 def test_generic_operation_put_edits_that_are_not_a_start_still_land(
@@ -700,7 +710,11 @@ def test_the_put_then_office_complete_door_is_closed_on_a_held_job(client, db_se
 
 @pytest.mark.parametrize(
     "fields",
-    [{"status": "in_progress"}, {"name": "should not land"}, {"quantity_complete": 3}],
+    [
+        {"status": "in_progress"},
+        {"name": "should not land", "change_reason": "routing test edit"},
+        {"quantity_complete": 3},
+    ],
     ids=["start", "rename", "count"],
 )
 def test_generic_operation_put_on_a_soft_deleted_work_order_is_a_404_for_the_whole_verb(

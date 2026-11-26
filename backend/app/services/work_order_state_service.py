@@ -39,6 +39,28 @@ TERMINAL_WO_STATUSES = {
     WorkOrderStatus.CANCELLED,
 }
 
+# Owner decision 2026-11-25 (routing changes on a released job): an operation is FINISHED when it
+# is COMPLETE or SKIPPED. Both clear every predecessor gate (the SQL twin and the in-memory twin,
+# edited together), both count as done for every "all operations complete" check, and neither is
+# remaining work for scheduling or the floor's lists. A SKIPPED operation produced NOTHING: it is
+# excluded from ``active_work_order_operations`` (so it contributes no good, scrap or declared
+# short, and never binds a ceiling or a completion bound), and every completion RECORD -- an
+# audit row, an "operations completed today" count, a historical cycle time -- still reads
+# COMPLETE alone. A TUPLE, not a set: ``OperationStatus`` is a ``str`` enum whose hash is its
+# NAME, so a plain ``"complete"`` string would never be found in a set of members, while tuple
+# membership compares with ``==`` and does find it.
+FINISHED_OPERATION_STATUSES: tuple[OperationStatus, ...] = (OperationStatus.COMPLETE, OperationStatus.SKIPPED)
+
+
+def is_operation_finished(status: Any) -> bool:
+    """True for a COMPLETE or SKIPPED operation status (member or its string value)."""
+    return status in FINISHED_OPERATION_STATUSES
+
+
+def is_operation_skipped(operation: Any) -> bool:
+    """True when ``operation`` (a row, a stand-in or ``None``) carries the SKIPPED status."""
+    return getattr(operation, "status", None) == OperationStatus.SKIPPED
+
 
 class WorkOrderStateError(ValueError):
     """Raised when a requested work-order transition is not valid."""
@@ -109,8 +131,8 @@ def operation_blocked_by_incomplete_predecessors(
     Replicates ``has_incomplete_predecessors(db, wo_id, candidate.sequence,
     current_operation_id=candidate.id, current_work_center_id=candidate.work_center_id,
     allow_same_work_center=<same value>)`` EXACTLY -- "exists an op of THIS work order
-    with ``sequence < candidate.sequence`` AND ``status != COMPLETE`` AND ``id !=
-    candidate.id``" and, WHEN ``allow_same_work_center`` is True, additionally AND
+    with ``sequence < candidate.sequence`` AND ``status`` not FINISHED (COMPLETE or SKIPPED,
+    ``FINISHED_OPERATION_STATUSES``) AND ``id != candidate.id``" and, WHEN ``allow_same_work_center`` is True, additionally AND
     (``work_center_id != candidate.work_center_id`` OR ``status == ON_HOLD``).
 
     That last disjunct is the HOLD CARVE-OUT and it is load-bearing: a held predecessor
@@ -146,7 +168,7 @@ def operation_blocked_by_incomplete_predecessors(
     persisted row can reach that difference; over-blocking (an op stays PENDING) is the
     safe side of it if one ever does.
 
-    ``incomplete_operations`` must be every not-COMPLETE operation of the work order,
+    ``incomplete_operations`` must be every not-FINISHED operation of the work order,
     materialized ONCE by the caller -- this predicate issues no query, which is what keeps
     ``release_next_ready_operation`` free of the PERF-4 N+1.
     """
@@ -154,6 +176,10 @@ def operation_blocked_by_incomplete_predecessors(
         if other.id == candidate.id:
             continue
         if other.sequence >= candidate.sequence:
+            continue
+        if is_operation_finished(other.status):
+            # The SQL twin's ``status NOT IN (COMPLETE, SKIPPED)``: a finished op never blocks,
+            # even when a caller's snapshot still carries it.
             continue
         if (
             # 081: the waiver itself is now conditional. False == this WO is a sequenced
@@ -373,7 +399,11 @@ def has_incomplete_predecessors(
     current_work_center_id: Optional[int] = None,
     allow_same_work_center: bool = False,
 ) -> bool:
-    """True when a lower-sequence operation of this WO is not COMPLETE (and so blocks).
+    """True when a lower-sequence operation of this WO is not FINISHED (and so blocks).
+
+    FINISHED is COMPLETE or SKIPPED (``FINISHED_OPERATION_STATUSES``): a step skipped off a
+    released job clears the gate exactly as a completed one does. Edited together with the
+    in-memory twin ``operation_blocked_by_incomplete_predecessors``.
 
     ``allow_same_work_center`` waives the block for predecessors sitting at the SAME work
     center as the candidate -- operations on one machine carry no process ordering among
@@ -399,7 +429,7 @@ def has_incomplete_predecessors(
         and_(
             WorkOrderOperation.work_order_id == work_order_id,
             WorkOrderOperation.sequence < sequence,
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
         )
     )
     if current_operation_id is not None:
@@ -521,7 +551,7 @@ def promote_ready_operations(
         # the same bool operation_action_gates hands the SQL twin, so promotion and
         # clock-in cannot disagree about whether this WO is a pool or a routing.
         allow_same_work_center = work_order_allows_same_work_center(work_order)
-        incomplete = [op for op in scoped_ops if op.status != OperationStatus.COMPLETE]
+        incomplete = [op for op in scoped_ops if not is_operation_finished(op.status)]
         to_promote = [
             op
             for op in pending_ops
@@ -618,7 +648,7 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
         .order_by(WorkOrderOperation.sequence)
         .all()
     )
-    incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
+    incomplete = [op for op in all_ops if not is_operation_finished(op.status)]
     if not incomplete:
         return []
     worked_operation_ids = _worked_operation_ids(db, work_order.company_id, incomplete)
@@ -648,15 +678,25 @@ def operations_worked_out_of_sequence(db: Session, work_order: WorkOrder) -> lis
 #                     the un-worked READY operations it NOW blocks -- under the work order's
 #                     own rule (``work_order_allows_same_work_center``), and only those whose
 #                     block is that operation (``blocked_by``) -- return to PENDING. Reached
-#                     through ``reopen_completed_operation``.
+#                     through ``reopen_completed_operation``. Also the routing-change verbs
+#                     (``routing_change_service``): restoring a SKIPPED step (``unskip``), adding
+#                     a step to a released job and resequencing, each with the re-opened / new /
+#                     moved operation as ``blocked_by`` -- one call per such operation.
 #
 # A later scope adds one ``DemotionScope`` literal and one branch in
 # ``_selected_for_demotion`` -- nothing else. Scheduling's
 # ``PUT /scheduling/work-orders/{id}/unschedule`` also writes READY -> PENDING, but that is
 # a transient scheduling reset the next reconciling read re-promotes, not a gate decision;
 # it deliberately does not go through this core.
-DemotionScope = Literal["sequencing", "all_unworked", "blocked_by"]
-DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked", "blocked_by")
+#   "newly_blocked" -- POST /work-orders/{id}/operations/resequence (owner decision 2026-11-25):
+#                     after a reorder, every un-worked READY operation the work order's OWN rule
+#                     now blocks returns to PENDING, EXCEPT those it already blocked before the
+#                     reorder (``already_blocked_ids``, computed by the caller before writing --
+#                     a supervisor's deliberate READY override is not this caller's to undo).
+#                     A reorder can move several operations at once, so no single ``blocked_by``
+#                     operation names the block.
+DemotionScope = Literal["sequencing", "all_unworked", "blocked_by", "newly_blocked"]
+DEMOTION_SCOPES: tuple[str, ...] = ("sequencing", "all_unworked", "blocked_by", "newly_blocked")
 
 
 def _selected_for_demotion(
@@ -666,6 +706,7 @@ def _selected_for_demotion(
     *,
     allow_same_work_center: bool = True,
     blocked_by: Optional[WorkOrderOperation] = None,
+    already_blocked_ids: Optional[set[int]] = None,
 ) -> bool:
     """Does ``scope`` take this (READY, un-worked) operation off the board?"""
     if scope == "sequencing":
@@ -688,7 +729,33 @@ def _selected_for_demotion(
         return not operation_blocked_by_incomplete_predecessors(
             operation, without, allow_same_work_center=allow_same_work_center
         )
+    if scope == "newly_blocked":
+        if operation.id in (already_blocked_ids or set()):
+            return False
+        return operation_blocked_by_incomplete_predecessors(
+            operation, incomplete, allow_same_work_center=allow_same_work_center
+        )
     raise ValueError(f"unknown demotion scope {scope!r}")  # pragma: no cover - guarded by the caller
+
+
+def ready_operations_blocked_now(work_order: WorkOrder, operations: Iterable[WorkOrderOperation]) -> set[int]:
+    """Ids of READY operations the work order's own predecessor rule blocks right now. Pure.
+
+    The ``already_blocked_ids`` snapshot a caller of the ``"newly_blocked"`` demotion scope takes
+    BEFORE it writes. Empty on a laser dispatch pool (no predecessor gating there).
+    """
+    if is_laser_dispatch_work_order(work_order):
+        return set()
+    ops = [op for op in operations if op is not None]
+    allow_same_work_center = work_order_allows_same_work_center(work_order)
+    incomplete = [op for op in ops if not is_operation_finished(op.status)]
+    return {
+        op.id
+        for op in ops
+        if op.status == OperationStatus.READY
+        and op.id is not None
+        and operation_blocked_by_incomplete_predecessors(op, incomplete, allow_same_work_center=allow_same_work_center)
+    }
 
 
 def demote_ready_operations(
@@ -698,6 +765,7 @@ def demote_ready_operations(
     scope: DemotionScope,
     exempt_laser: bool = True,
     blocked_by: Optional[WorkOrderOperation] = None,
+    already_blocked_ids: Optional[set[int]] = None,
 ) -> list[WorkOrderOperation]:
     """READY -> PENDING for un-worked operations ``scope`` selects. THE demotion core.
 
@@ -743,7 +811,9 @@ def demote_ready_operations(
         return []
     if scope == "sequencing" and work_order_allows_same_work_center(work_order):
         return []
-    allow_same_work_center = work_order_allows_same_work_center(work_order) if scope == "blocked_by" else True
+    allow_same_work_center = (
+        work_order_allows_same_work_center(work_order) if scope in ("blocked_by", "newly_blocked") else True
+    )
 
     # Invariant 1: scoped to the work order's OWN company_id, off the WO row the caller
     # already resolved tenant-scoped -- this both selects the rows to WRITE and supplies
@@ -760,15 +830,20 @@ def demote_ready_operations(
 
     worked_operation_ids = _worked_operation_ids(db, work_order.company_id, candidates)
 
-    # The snapshot stays correct as demotions land: a demoted op is still not COMPLETE,
+    # The snapshot stays correct as demotions land: a demoted op is still not finished,
     # so it keeps blocking its successors exactly as it did while READY.
-    incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
+    incomplete = [op for op in all_ops if not is_operation_finished(op.status)]
     demoted: list[WorkOrderOperation] = []
     for op in candidates:
         if _operation_has_been_worked(op, worked_operation_ids):
             continue
         if not _selected_for_demotion(
-            scope, op, incomplete, allow_same_work_center=allow_same_work_center, blocked_by=blocked_by
+            scope,
+            op,
+            incomplete,
+            allow_same_work_center=allow_same_work_center,
+            blocked_by=blocked_by,
+            already_blocked_ids=already_blocked_ids,
         ):
             continue
         op.status = OperationStatus.PENDING
@@ -1195,7 +1270,8 @@ def per_item_operation_totals(
     that eager-loads that relationship (the wallboard does). A new adopter reading
     operations off a plain query gets one SELECT per operation.
     """
-    live_ops = [op for op in (operations or []) if not _operation_nest_is_deleted(op)]
+    # A SKIPPED line item is off the route: its target is no longer part of the pieces owed.
+    live_ops = [op for op in (operations or []) if not _operation_nest_is_deleted(op) and not is_operation_skipped(op)]
     if not live_ops:
         return None
 
@@ -1249,17 +1325,34 @@ def _operation_nest_is_deleted(operation: WorkOrderOperation) -> bool:
     return getattr(operation, "cancelled_nest_id", None) is not None
 
 
-def active_work_order_operations(work_order: WorkOrder) -> list[WorkOrderOperation]:
-    """Production obligations, excluding retained operations of cancelled nests.
+def active_work_order_operations(work_order: WorkOrder, *, include_skipped: bool = False) -> list[WorkOrderOperation]:
+    """Production obligations, excluding retained operations of cancelled nests and SKIPPED steps.
 
     Cancellation parks the operation ON_HOLD for traceability; it is no longer
     work to finish. A live nest on hold remains an obligation. Never remove rows
     from the ORM relationship: their history and nest linkage must survive.
+
+    A SKIPPED step (owner decision 2026-11-25) is no obligation either: it produced nothing, so
+    leaving it out is what keeps it TRANSPARENT to every caller -- the all-complete checks (the
+    live finalizer and the read reconcile), the finished-quantity header, the force-complete
+    loop and its evidence bounds, chain credit and the progress figures. It stays on the
+    relationship (the traveler shows it). ``include_skipped=True`` is for the one caller that
+    must still move a skipped step's stored target with the order
+    (``rescale_restated_operation_targets``), so a later restore does not resurrect a stale one.
     """
     operations = list(work_order.operations or [])
+    if not include_skipped:
+        operations = [op for op in operations if not is_operation_skipped(op)]
     if not is_laser_dispatch_work_order(work_order):
         return operations
     return [op for op in operations if not _operation_nest_is_deleted(op)]
+
+
+def _without_skipped(operations: Iterable[Any]) -> list[Any]:
+    """``operations`` minus SKIPPED steps -- the accounting helpers' own guard, so a caller that
+    hands over a raw sibling read (``upstream_figures_by_operation``) gets the same transparent
+    treatment ``active_work_order_operations`` gives the relationship."""
+    return [op for op in (operations or []) if op is not None and not is_operation_skipped(op)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1397,7 +1490,9 @@ def stage_accounting(
       component losses before it stop counting for the stages after it -- a completed
       stage's output already embodies whatever was fed into it.
     """
-    ops = [op for op in (operations or []) if op.id is not None]
+    # A SKIPPED step is transparent: it declares no short and its ceiling never constrains the
+    # next stage, so it is not in the walk at all (owner decision 2026-11-25).
+    ops = [op for op in _without_skipped(operations) if op.id is not None]
 
     def credited(key: tuple) -> bool:
         if main_credit is not None and key == MAIN_CHAIN_KEY:
@@ -1653,7 +1748,7 @@ def finished_quantity_at_all_complete(
       raises the header from a component operation, so that would book 0.
     """
     ordered = _qty(work_order.quantity_ordered)
-    ops = list(operations or [])
+    ops = _without_skipped(operations)
     if ordered <= QTY_EPSILON:
         return existing
     if not any(_declared_short(op) > QTY_EPSILON for op in ops):
@@ -1754,7 +1849,8 @@ def work_order_completion_bounds(
     refuses ``quantity_complete + hard_loss > ordered`` with or without a reason.
     """
     ordered = _qty(work_order.quantity_ordered)
-    ops = [op for op in (operations or []) if op.id is not None]
+    # A SKIPPED step produced nothing and binds nothing (owner decision 2026-11-25).
+    ops = [op for op in _without_skipped(operations) if op.id is not None]
 
     def cap_for(op: WorkOrderOperation, acct: OperationAccounting) -> float:
         if has_evidence_by_op.get(op.id, False):
@@ -2139,6 +2235,7 @@ _WHAT_IF_ATTRS = (
     "quantity_complete",
     "quantity_scrapped",
     "cancelled_nest_id",
+    "work_center_id",
 )
 
 
@@ -2230,6 +2327,47 @@ def accounting_change_strands(
     return None
 
 
+def routing_change_strands(
+    work_order: WorkOrder,
+    operations: Iterable[WorkOrderOperation],
+    after: Iterable[Any],
+) -> Optional[AccountingStrand]:
+    """Would a ROUTING change strand an operation's accounting? The first one it would, or ``None``.
+
+    The routing-change twin of :func:`accounting_change_strands` (owner decision 2026-11-25:
+    skip, restore, add and resequence a step on a released job). Chain credit flows BY SEQUENCE,
+    so moving, adding, skipping or restoring a step can change what reaches a later stage even
+    though the changed steps themselves are un-worked. ``operations`` is the route as it is;
+    ``after`` the same route as the change would leave it -- changed rows as
+    :class:`_OperationWhatIf` stand-ins (status / sequence overridden), a new step as a stand-in
+    with a placeholder id. Only operations present in BOTH are judged, with the same two rules
+    (a COMPLETE operation that adds up today and would not, or recorded good that fits its
+    ceiling today and would not); an operation already short or over before the change never
+    blocks it. Pure.
+    """
+    ops = [op for op in (operations or []) if op.id is not None]
+    proposed = [op for op in (after or []) if getattr(op, "id", None) is not None]
+    before_figures = stage_accounting(work_order, ops)
+    after_figures = stage_accounting(work_order, proposed)
+    proposed_by_id = {op.id: op for op in proposed}
+    for op in sorted(ops, key=lambda item: (item.sequence or 0, item.id or 0)):
+        moved = proposed_by_id.get(op.id)
+        if moved is None or is_operation_skipped(op) or is_operation_skipped(moved):
+            continue
+        acct_before = _accounting_from_figures(work_order, op, before_figures)
+        acct_after = _accounting_from_figures(work_order, moved, after_figures)
+        if op.status == OperationStatus.COMPLETE and acct_before.is_accounted and not acct_after.is_accounted:
+            return AccountingStrand(op, "unaccounted", acct_before, acct_after)
+        if acct_before.good <= acct_before.ceiling + QTY_EPSILON and acct_after.good > acct_after.ceiling + QTY_EPSILON:
+            return AccountingStrand(op, "over_ceiling", acct_before, acct_after)
+    return None
+
+
+def operation_what_if(operation: Any, **overrides: Any) -> Any:
+    """A plain stand-in for ``operation`` with ``overrides`` applied (never an ORM row)."""
+    return _OperationWhatIf(operation, **overrides)
+
+
 def sequencing_flip_conflict(
     work_order: WorkOrder,
     operations: Iterable[WorkOrderOperation],
@@ -2254,7 +2392,7 @@ def sequencing_flip_conflict(
     ``None`` when nothing was declared, which is every work order flipped today.
     """
     main_ops = sorted(
-        (op for op in (operations or []) if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY),
+        (op for op in _without_skipped(operations) if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY),
         key=lambda op: (op.sequence or 0, op.id or 0),
     )
     for declaring in main_ops:
@@ -2588,6 +2726,11 @@ def reduce_operation_produced_quantity(
     )
 
 
+def active_operation_id(work_order: WorkOrder) -> Optional[int]:
+    """Public name for :func:`_active_operation_id` (the routing-change verbs re-point the WO)."""
+    return _active_operation_id(work_order)
+
+
 def _active_operation_id(work_order: WorkOrder) -> Optional[int]:
     """The operation the WO is 'currently on', for ``current_operation_id`` (RUP-1).
 
@@ -2604,7 +2747,7 @@ def _active_operation_id(work_order: WorkOrder) -> Optional[int]:
             if op.status == wanted:
                 return op.id
     for op in operations:
-        if op.status != OperationStatus.COMPLETE:
+        if not is_operation_finished(op.status):
             return op.id
     return None
 
@@ -2621,9 +2764,10 @@ def release_operation_schedule_reservation(operation: WorkOrderOperation) -> boo
     capacity. Nulling the schedule on completion frees the reservation by DATA rather
     than by every consumer remembering the filter, so the in-tree status filters and
     any new reader agree. Returns True if it changed anything (for the reconcile
-    change-tracking). No-op if the op is not COMPLETE or already cleared.
+    change-tracking). No-op if the op is not finished or already cleared. A SKIPPED step
+    reserves nothing either (the skip verb frees it the same way).
     """
-    if operation.status != OperationStatus.COMPLETE:
+    if not is_operation_finished(operation.status):
         return False
     changed = False
     if operation.scheduled_start is not None:
@@ -2650,7 +2794,7 @@ def _remaining_incomplete_operation_ids(
     for op in active_work_order_operations(work_order):
         if op.id == completed_operation.id:
             continue
-        if op.status != OperationStatus.COMPLETE:
+        if not is_operation_finished(op.status):
             remaining.append(op.id)
     return remaining
 
@@ -3126,6 +3270,10 @@ def _sync_operation_status_from_quantity(
     the gate. Only the lift is withheld; quantities still reconcile and the next read
     after Release / Resume performs it.
     """
+    if is_operation_skipped(operation):
+        # A skipped step is never re-derived from evidence (it carries none -- the skip verb
+        # refuses an operation with recorded work); only /unskip brings it back.
+        return False
     target_qty = operation_target_quantity(operation)
     if target_qty <= 0:
         return False
@@ -3201,7 +3349,7 @@ def _sync_work_order_status_from_operations(
         return False
 
     changed = False
-    all_operations_complete = all(operation.status == OperationStatus.COMPLETE for operation in operations)
+    all_operations_complete = all(is_operation_finished(operation.status) for operation in operations)
     any_operation_progress = any(
         operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE)
         or float(operation.quantity_complete or 0) > 0

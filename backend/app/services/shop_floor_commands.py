@@ -353,6 +353,9 @@ def hold_operation_command(db, current_user, company_id, operation_id, hold_data
 
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Cannot put completed operation on hold")
+    if operation.status == OperationStatus.SKIPPED:
+        # A skipped step is off the route; holding it would bring it back (hold_blockers twin).
+        raise HTTPException(status_code=409, detail="Cannot put a skipped operation on hold")
 
     # A stale screen can still name an operation whose nest was cancelled.
     # Accepting Hold here promises a reversible pause, but Resume correctly

@@ -430,6 +430,13 @@ _ADD_OPERATION_SCHEMA: Dict[str, Any] = {
             "NOT an operation quantity; an operation runs the work order's quantity_ordered.",
         },
         "operation_group": {"type": "string", "maxLength": 50},
+        "change_reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Why the step is being added. REQUIRED by the route once the work order is no longer a "
+            "DRAFT (1-500 characters); ignored on a DRAFT. A standing API token cannot add a step to a released "
+            "work order at all (403).",
+        },
         "quantity": {
             "type": "number",
             "description": "NOT ACCEPTED (refused with an explanation): an operation has no quantity of its own.",
@@ -457,6 +464,7 @@ _ADD_OPERATION_PASSTHROUGH = (
     "component_part_id",
     "component_quantity",
     "operation_group",
+    "change_reason",
 )
 
 
@@ -1331,8 +1339,8 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         "POST /api/v1/work-orders/{id}/operations — Add one routing step to a work order. Work center by id OR name; "
         "sequence defaults to the next multiple of 10. Operation names must be short shop-floor steps — file names, "
         "paths and 'Part Detail' are refused, not rewritten. An operation has no quantity of its own (it runs the "
-        "work order's quantity_ordered); component_quantity is BOM component demand. Not for laser nest work "
-        "orders. [Work Orders]",
+        "work order's quantity_ordered); component_quantity is BOM component demand. On a released work order "
+        "change_reason is required. Not for laser nest work orders. [Work Orders]",
         _strict(_ADD_OPERATION_SCHEMA),
         _MUTATE,
         _add_operation,

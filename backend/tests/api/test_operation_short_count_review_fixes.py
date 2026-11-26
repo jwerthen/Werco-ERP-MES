@@ -321,7 +321,9 @@ class TestOperationPutOnAnOpenOperation:
         assert good_edit.status_code == 403, good_edit.text
         assert good_edit.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
         renamed = client.put(
-            OPERATION_PUT_URL.format(op=op.id), json={"version": op.version, "name": "Renamed"}, headers=token
+            OPERATION_PUT_URL.format(op=op.id),
+            json={"version": op.version, "name": "Renamed", "change_reason": "routing test edit"},
+            headers=token,
         )
         assert renamed.status_code == 200, "a non-count edit stays open to a token"
 

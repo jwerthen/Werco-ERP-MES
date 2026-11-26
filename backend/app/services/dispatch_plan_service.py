@@ -57,6 +57,7 @@ from app.services.wallboard_service import LABOR_ENTRY_TYPES, operator_display_n
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     is_laser_dispatch_work_order,
+    is_operation_finished,
     operation_blocked_by_incomplete_predecessors,
     operation_target_quantity,
     work_order_allows_same_work_center,
@@ -631,7 +632,7 @@ def _build_lanes(
     blockers = _open_blockers_by_work_order(db, company_id, work_order_ids)
 
     tie_operation_ids = [
-        op.id for ops in shown_ops_by_wo.values() for op in ops if op.status != OperationStatus.COMPLETE
+        op.id for ops in shown_ops_by_wo.values() for op in ops if not is_operation_finished(op.status)
     ]
     ties = tie_views_for_operations(db, company_id=company_id, operation_ids=tie_operation_ids)
 
@@ -646,7 +647,7 @@ def _build_lanes(
         mode = _lane_mode(work_order)
         is_laser = mode == "laser"
         allow_same_wc = work_order_allows_same_work_center(work_order)
-        incomplete = [op for op in all_ops if op.status != OperationStatus.COMPLETE]
+        incomplete = [op for op in all_ops if not is_operation_finished(op.status)]
 
         if mode == "routing":
             ordered = sorted(shown, key=lambda op: (op.sequence, op.id))
@@ -716,7 +717,7 @@ def _build_lanes(
             quantity_ordered=float(work_order.quantity_ordered or 0.0),
             quantity_complete=float(work_order.quantity_complete or 0.0),
             ops_total=len(shown),
-            ops_complete=sum(1 for op in shown if op.status == OperationStatus.COMPLETE),
+            ops_complete=sum(1 for op in shown if is_operation_finished(op.status)),
             open_blocker_count=blockers.get(work_order.id, 0),
             any_material_short=any_short,
             operations=lane_ops,

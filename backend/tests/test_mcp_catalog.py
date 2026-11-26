@@ -381,6 +381,11 @@ class TestNames:
             # Shadowed Work Orders twins are named too (names are assigned before shadowing).
             "duplicate_work_order",
             "release_work_order",
+            # Routing changes on a released job (owner decision 2026-11-25) join the "operation(s)"
+            # family the Shop Floor / Routing collisions seed: work_orders_skip_operation etc.
+            "skip_operation",
+            "unskip_operation",
+            "resequence_operations",
         }
 
     def test_known_collisions(self, catalog):

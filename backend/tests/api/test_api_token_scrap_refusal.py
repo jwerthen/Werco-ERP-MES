@@ -697,7 +697,13 @@ class TestOperationPut:
         set_op(db_session, op, quantity_complete=4, quantity_scrapped=1, scrap_reason="crack")
         resp = client.put(
             OPERATION_PUT_URL.format(op=op.id),
-            json={"version": op.version, "quantity_scrapped": 1, "scrap_reason": "crack", "name": "Renamed"},
+            json={
+                "version": op.version,
+                "quantity_scrapped": 1,
+                "scrap_reason": "crack",
+                "name": "Renamed",
+                "change_reason": "routing test edit",
+            },
             headers=_token(client, admin_headers, supervisor),
         )
         assert resp.status_code == 200, resp.text
@@ -1035,6 +1041,7 @@ class TestSubEpsilonScrapFromAToken:
                 "quantity_scrapped": 1 + SUB_EPSILON,
                 "scrap_reason": PERSONS_REASON,
                 "name": "Renamed",
+                "change_reason": "routing test edit",
             },
             headers=headers,
         )
@@ -1069,7 +1076,13 @@ class TestSubEpsilonScrapFromAToken:
 
         op_resp = client.put(
             OPERATION_PUT_URL.format(op=op.id),
-            json={"version": op.version, "quantity_scrapped": noisy, "scrap_reason": PERSONS_REASON, "name": "Renamed"},
+            json={
+                "version": op.version,
+                "quantity_scrapped": noisy,
+                "scrap_reason": PERSONS_REASON,
+                "name": "Renamed",
+                "change_reason": "routing test edit",
+            },
             headers=headers,
         )
         assert op_resp.status_code == 200, op_resp.text
@@ -1154,7 +1167,12 @@ DOOR_CASES = {
         UserRole.SUPERVISOR,
         _door_closable,
         lambda c: {"operation_id": c["op"], "version": c["version"], "quantity_scrapped": 1, "scrap_reason": "x"},
-        lambda c: {"operation_id": c["op"], "version": c["version"], "name": "Renamed"},
+        lambda c: {
+            "operation_id": c["op"],
+            "version": c["version"],
+            "name": "Renamed",
+            "change_reason": "routing test edit",
+        },
         lambda db, c: fresh(db, WorkOrderOperation, c["op"]).name == "Renamed",
     ),
     "update_work_order": (

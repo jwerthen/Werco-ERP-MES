@@ -82,6 +82,14 @@ MSG_OPERATION_ON_HOLD_NO_START = (
     "This operation is on hold — lift it with Resume (kiosk) or Clear Hold (desk) first. "
     "Starting it does not lift a hold."
 )
+# A SKIPPED step (owner decision 2026-11-25) is off the route: no start verb, no hold and no
+# generic edit may bring it back -- only POST /work-orders/operations/{id}/unskip, which is
+# reasoned and audited. 409 on every door that refuses it.
+MSG_OPERATION_SKIPPED = (
+    "This operation was skipped and is off the route. Restore it (Restore step on the work order) before "
+    "starting, holding or editing it."
+)
+MSG_CANNOT_HOLD_SKIPPED = "Cannot put a skipped operation on hold"
 # PUT /work-orders/{id} {status: on_hold} on a DRAFT. Every hold placed from now on is on
 # RELEASED work, which is what lets POST /work-orders/{id}/resume decide where a held job
 # goes back to without guessing whether it was ever authorized for the floor.
@@ -676,13 +684,41 @@ def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperat
     """
     if operation is None:
         return False
+    if _recorded_without_labor_read(operation):
+        return True
+    return operation_has_labor_evidence(db, operation.id, company_id)
+
+
+def _recorded_without_labor_read(operation: WorkOrderOperation) -> bool:
+    """The part of :func:`operation_has_recorded_work` that needs no query (good, scrap, a start)."""
     if float(operation.quantity_complete or 0) > QTY_EPSILON or float(operation.quantity_scrapped or 0) > QTY_EPSILON:
         return True
     if operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE):
         return True
-    if operation.actual_start is not None:
-        return True
-    return operation_has_labor_evidence(db, operation.id, company_id)
+    return operation.actual_start is not None
+
+
+def operation_ids_with_recorded_work(
+    db: Session, operations: Iterable[WorkOrderOperation], company_id: int
+) -> set[int]:
+    """Ids of ``operations`` that :func:`operation_has_recorded_work` reports -- in ONE labor query.
+
+    The batched form of the same rule (not a twin: both read :func:`_recorded_without_labor_read`
+    plus tenant-scoped TimeEntry existence), for the routing-change verbs that judge a whole
+    route at once (``routing_change_service``).
+    """
+    ops = [op for op in operations if op is not None and op.id is not None]
+    recorded = {op.id for op in ops if _recorded_without_labor_read(op)}
+    remaining = [op.id for op in ops if op.id not in recorded]
+    if remaining:
+        recorded.update(
+            row[0]
+            for row in db.query(TimeEntry.operation_id)
+            .filter(TimeEntry.company_id == company_id, TimeEntry.operation_id.in_(remaining))
+            .distinct()
+            .all()
+        )
+    return recorded
 
 
 def operation_has_labor_evidence(db: Session, operation_id: int, company_id: int) -> bool:
@@ -854,6 +890,8 @@ def hold_blockers(operation: WorkOrderOperation) -> List[str]:
     """Reasons PUT /shop-floor/operations/{id}/hold would refuse right now."""
     if operation.status == OperationStatus.COMPLETE:
         return [MSG_CANNOT_HOLD_COMPLETE]
+    if operation.status == OperationStatus.SKIPPED:
+        return [MSG_CANNOT_HOLD_SKIPPED]
     return []
 
 

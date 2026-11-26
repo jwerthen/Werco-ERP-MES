@@ -31,6 +31,13 @@ class OperationStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     COMPLETE = "complete"
     ON_HOLD = "on_hold"
+    # Owner decision 2026-11-25: a routing step taken off a RELEASED job is marked SKIPPED, never
+    # deleted -- it stays on the traveler with who / when / why (``skipped_at`` / ``skipped_by`` /
+    # ``skip_reason``) and counts as FINISHED for every predecessor gate and all-complete check,
+    # producing nothing (``work_order_state_service.FINISHED_OPERATION_STATUSES``). Written only by
+    # ``POST /work-orders/operations/{id}/skip``; ``/unskip`` returns it to PENDING. Stored as the
+    # member NAME ``SKIPPED`` in the native ``operationstatus`` type (migration 135).
+    SKIPPED = "skipped"
 
 
 class WorkOrder(Base, SoftDeleteMixin, TenantMixin):
@@ -326,6 +333,19 @@ class WorkOrderOperation(Base, TenantMixin):
     # as zero credit. Server-written only -- keep it off every request schema.
     # Lock-step with migration 117_operation_short_declared.
     quantity_short_declared = Column(Float, nullable=True)
+
+    # Routing change on a released job (migration 135_operation_skipped): who skipped this step,
+    # when (naive UTC, like the sibling timestamps), and the typed reason. Set together by the
+    # skip verb and cleared together by unskip; NULL on every operation never skipped.
+    # Server-written only -- keep them off every request schema. The FK name is pinned so the
+    # migration and ``create_all`` agree.
+    skipped_at = Column(DateTime, nullable=True)
+    skipped_by = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_work_order_operations_skipped_by"),
+        nullable=True,
+    )
+    skip_reason = Column(String(500), nullable=True)
 
     # Kiosk telemetry (Foundry redesign): the most recent production-evidence report
     # on this operation -- stamped by POST /shop-floor/operations/{id}/production and

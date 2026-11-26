@@ -30,6 +30,7 @@ from app.schemas.analytics import (
 from app.services.material_readiness_service import material_readiness
 from app.services.owned_property_service import COMPANY_OWNED_ITEM_CLAUSES
 from app.services.scheduling_projection import _project_work_order_schedule
+from app.services.work_order_state_service import FINISHED_OPERATION_STATUSES, is_operation_finished
 from app.services.working_calendar_service import load_working_calendars, working_hours
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class PredictionService:
         calendars = load_working_calendars(self.db, self.company_id, list(wc_names))
         today = datetime.now(ZoneInfo("America/Chicago")).date()
         materials = material_readiness(self.db, self.company_id, [wo], today)["jobs"][wo.id]
-        if all(op.status == OperationStatus.COMPLETE for op in operations):
+        if all(is_operation_finished(op.status) for op in operations):
             materials = {
                 "status": "not_defined",
                 "ready_date": None,
@@ -142,8 +143,9 @@ class PredictionService:
         max_queue_wait = 0
 
         for op in operations:
-            if op.status == OperationStatus.COMPLETE:
-                # Already done
+            if is_operation_finished(op.status):
+                # Already done (a SKIPPED step is done too: it carries no actuals and no
+                # remaining time, so it contributes zero hours and leaves current_time alone)
                 predicted_ops.append(
                     OperationPrediction(
                         operation_id=op.id,
@@ -457,7 +459,7 @@ class PredictionService:
                 .filter(
                     WorkOrderOperation.work_order_id.in_(ordered_qty_by_wo.keys()),
                     WorkOrderOperation.company_id == self.company_id,
-                    WorkOrderOperation.status != OperationStatus.COMPLETE,
+                    WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
                 )
                 .order_by(WorkOrderOperation.work_order_id, WorkOrderOperation.sequence, WorkOrderOperation.id)
                 .all()

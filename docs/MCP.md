@@ -2,8 +2,8 @@
 
 `backend/app/mcp/` turns the FastAPI application's own OpenAPI document into an MCP tool catalog
 and dispatches every tool call back through the real routers, as the calling user. An agent
-(Cursor, Claude Code, a chat bot) gets **797 tools** — 16 hand-written *convenience* tools plus
-**781 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
+(Cursor, Claude Code, a chat bot) gets **800 tools** — 16 hand-written *convenience* tools plus
+**784 generated** ones — and every one of them is exactly as powerful, and exactly as restricted,
 as the same request from the web app. A **read-only** API token is shown fewer tools, and an
 **AI-external** one fewer still (§4.1, §4.2).
 
@@ -191,6 +191,14 @@ Certificate of Conformance (`POST /shipping/{id}/coc`) left the catalog (`EXCLUD
 route (§8), so an agent can ship but can never send the acknowledgment that accepts open quality
 items: 16 convenience + **781** generated, 17 shadowed, two fewer generated than the 783 above. No existing name shifted. Both routes are
 writes, so the read-only catalog is unchanged at 8 convenience + **310** generated.
+
+**Re-checked again on 2026-11-25 after routing changes on a released work order**: skipping a step,
+restoring it and resequencing steps added three write routes, named into the Work Orders
+"operation(s)" family (`work_orders_skip_operation`, `work_orders_unskip_operation`,
+`work_orders_resequence_operations`): 16 convenience + **784** generated, 17 shadowed. Each refuses
+any API token 403 (a routing change is a person's judgment), and `add_operation` now takes an
+optional `change_reason`, required by the route once the work order is no longer a DRAFT. All three
+are writes, so the read-only catalog is unchanged at 8 convenience + **310** generated.
 
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
@@ -1055,7 +1063,8 @@ exclusions (twenty-eight) and company creation was deleted with its route, while
 list, the Sheet Gaps list, the four untied laser-nest reads and System Health were added (**784**);
 then Labor Review added one read and moved the two labor-approval tools into the exclusions with the
 new set-clock-out write (thirty-one): **783**; the CoC issue then joined the exclusions
-(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781 generated tools**.
+(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781**; on 2026-11-25
+skip / unskip / resequence made it **784 generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 

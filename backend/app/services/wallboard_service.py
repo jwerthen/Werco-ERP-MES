@@ -64,7 +64,12 @@ from app.schemas.wallboard import (
 )
 from app.services.production_calendar import current_production_day, production_day_window_utc
 from app.services.production_calendar_service import attribute_time_entries, load_production_calendar
-from app.services.work_order_state_service import operation_target_quantity, per_item_operation_totals
+from app.services.work_order_state_service import (
+    FINISHED_OPERATION_STATUSES,
+    is_operation_finished,
+    operation_target_quantity,
+    per_item_operation_totals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,7 +371,7 @@ def _build_job_wall(
                 down=bool(current is not None and current.work_center_id in down_wc_ids),
                 running=running,
                 current_op=current_op,
-                ops_completed=sum(1 for op in operations if op.status == OperationStatus.COMPLETE),
+                ops_completed=sum(1 for op in operations if is_operation_finished(op.status)),
                 ops_total=len(operations),
             )
         )
@@ -437,7 +442,7 @@ def _dept_open_op_wo_ids(db: Session, company_id: int, dept_norm: str):
         .filter(
             WorkOrderOperation.company_id == company_id,
             WorkCenter.company_id == company_id,
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
             func.lower(WorkCenter.work_center_type) == dept_norm,
         )
     )

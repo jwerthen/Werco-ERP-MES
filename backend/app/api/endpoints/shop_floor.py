@@ -161,6 +161,7 @@ from app.services.operation_action_gates import (
     MSG_ALREADY_IN_PROGRESS,
     MSG_NO_LABOR_RECORDED,
     MSG_OPERATION_ON_HOLD_NO_START,
+    MSG_OPERATION_SKIPPED,
     MSG_PREDECESSORS_INCOMPLETE,
     MSG_REOPEN_IS_OFFICE_ONLY,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
@@ -212,6 +213,7 @@ from app.services.wallboard_service import (
 )
 from app.services.work_order_blocker_service import blocker_default_title
 from app.services.work_order_state_service import (
+    FINISHED_OPERATION_STATUSES,
     QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     OperationAccounting,
@@ -224,6 +226,7 @@ from app.services.work_order_state_service import (
     finalize_operation_completion,
     find_parent_to_advance,
     floor_operation_quantity_at_evidence,
+    is_operation_finished,
     operation_accounting,
     operation_target_quantity,
     promote_ready_operations,
@@ -4155,8 +4158,8 @@ def get_all_operations(
         except ValueError:
             pass  # Invalid status, ignore filter
     else:
-        # Default: exclude completed operations
-        query = query.filter(WorkOrderOperation.status != OperationStatus.COMPLETE)
+        # Default: exclude finished operations (COMPLETE, and SKIPPED steps taken off the route)
+        query = query.filter(WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES))
 
     # Search by WO number or part number
     if search:
@@ -4202,7 +4205,7 @@ def get_all_operations(
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, work_orders, current_user, company_id)
     if not status:
-        operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
+        operations = [op for op in operations if not is_operation_finished(op.status)]
 
     # Gap-free RUN rank, same contract as the kiosk queue payload: position of the
     # operation within its work center's LIVE dispatch queue (queued_operations --
@@ -4407,6 +4410,8 @@ def start_operation(
     # Validate operation can be started
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
 
     if operation.status == OperationStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail=MSG_ALREADY_IN_PROGRESS)
