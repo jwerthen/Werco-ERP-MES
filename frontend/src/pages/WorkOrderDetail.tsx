@@ -443,9 +443,7 @@ const getOperationProgressMetrics = (workOrder: WorkOrder) => {
   // their planned work no longer contributes to the active route's progress.
   // A SKIPPED step (taken off a released job) produced nothing and is no obligation, so it is
   // left out of progress exactly as the server's `active_work_order_operations` leaves it out.
-  const operations = (workOrder.operations || []).filter(
-    op => op.cancelled_nest_id == null && op.status !== 'skipped'
-  );
+  const operations = (workOrder.operations || []).filter(op => op.cancelled_nest_id == null && op.status !== 'skipped');
   if (operations.length === 0) {
     const ordered = Number(workOrder.quantity_ordered || 0);
     const complete = Number(workOrder.quantity_complete || 0);
@@ -2928,11 +2926,7 @@ export default function WorkOrderDetail() {
         </div>
 
         {canChangeRouting && routingEditableWorkOrder(workOrder) && routingEditorOpen && (
-          <RoutingEditor
-            workOrder={workOrder}
-            onChanged={loadWorkOrder}
-            onClose={() => setRoutingEditorOpen(false)}
-          />
+          <RoutingEditor workOrder={workOrder} onChanged={loadWorkOrder} onClose={() => setRoutingEditorOpen(false)} />
         )}
 
         {workOrder.operations.length === 0 ? (
@@ -3112,11 +3106,13 @@ export default function WorkOrderDetail() {
                                   <div className="font-semibold uppercase tracking-wide text-slate-400">Skipped</div>
                                   <p className="mt-1">{op.skip_reason || 'No reason recorded'}</p>
                                   <div className="mt-1 text-slate-500">
-                                    {op.skipped_by != null
-                                      ? op.skipped_by === user?.id
-                                        ? 'You'
-                                        : userNameById[op.skipped_by] || `User #${op.skipped_by}`
-                                      : 'Who skipped it was not recorded'}
+                                    {op.skipped_by_name
+                                      ? op.skipped_by_name
+                                      : op.skipped_by != null
+                                        ? op.skipped_by === user?.id
+                                          ? 'You'
+                                          : userNameById[op.skipped_by] || `User #${op.skipped_by}`
+                                        : 'Who skipped it was not recorded'}
                                     {op.skipped_at ? ` \u00b7 ${formatDateTimeCT(op.skipped_at)}` : ''}
                                   </div>
                                 </div>

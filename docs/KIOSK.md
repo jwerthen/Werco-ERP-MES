@@ -438,7 +438,8 @@ the office app on the work order):
 
 - **A sequenced routing** — the default for every work order created since this shipped — unlocks one
   step at a time. An operation appears on the queue only once **every** earlier-sequence operation of
-  that work order is complete, its own work center included. A 4-operation weld assembly whose first
+  that work order is complete (or skipped — a step a supervisor took off a released job, which never
+  appears on the queue itself), its own work center included. A 4-operation weld assembly whose first
   three steps sit on one weld cell (Skid Fit → Wall Fit Up → Accessory Fit Up → Weld Out) offers the
   floor exactly one of them at a time, so the build order survives.
 - **A dispatch pool** — what every work order that predates it carries, and what a

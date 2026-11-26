@@ -463,6 +463,8 @@ export interface WorkOrderOperation extends OperationShortCountFields {
   /** Set together when the step was skipped (status `skipped`), null otherwise. UTC `Z`. */
   skipped_at?: string | null;
   skipped_by?: number | null;
+  /** Server-resolved display name of `skipped_by` (null when unresolvable). */
+  skipped_by_name?: string | null;
   skip_reason?: string | null;
   /**
    * WHY this operation is held, WHO placed the hold and WHEN.

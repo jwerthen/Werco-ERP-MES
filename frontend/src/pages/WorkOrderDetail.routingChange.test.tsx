@@ -239,6 +239,35 @@ describe('a skipped step on the traveler', () => {
     expect(disclosure).toHaveTextContent(/9:30/);
   });
 
+  it('prefers the server-resolved skipped_by_name, even over "You"', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({
+        operations: OPERATIONS_WITH_SKIP.map(op =>
+          op.id === 702 ? { ...op, skipped_by: 1, skipped_by_name: 'Pat Supervisor' } : op
+        ),
+      })
+    );
+    renderDetail();
+    await loaded();
+    const disclosure = await screen.findByTestId('op-skipped-702');
+    expect(disclosure).toHaveTextContent('Pat Supervisor');
+    expect(disclosure).not.toHaveTextContent('You');
+  });
+
+  it('falls back to "User #N" when the name is unresolved and it is someone else', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(
+      makeWorkOrder({
+        operations: OPERATIONS_WITH_SKIP.map(op =>
+          op.id === 702 ? { ...op, skipped_by: 77, skipped_by_name: null } : op
+        ),
+      })
+    );
+    renderDetail();
+    await loaded();
+    const disclosure = await screen.findByTestId('op-skipped-702');
+    expect(disclosure).toHaveTextContent('User #77');
+  });
+
   it('offers no Complete or Material on the skipped row', async () => {
     renderDetail();
     await loaded();
