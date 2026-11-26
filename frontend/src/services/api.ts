@@ -117,6 +117,12 @@ import {
   OperationInspectionRequest,
   OperationInspectionResponse,
   WorkOrderOperationUpdatePayload,
+  WorkOrderOperationAddPayload,
+  WorkOrderOperation,
+  OperationRoutingReasonPayload,
+  OperationsResequencePayload,
+  OperationsResequenceResponse,
+  RoutingChangeResponse,
 } from '../types';
 import { ScanResolveRequest, ScanResolveResult } from '../types/scan';
 import type {
@@ -2165,8 +2171,47 @@ class ApiService {
   }
 
   // Operations
-  async addOperation(workOrderId: number, data: any) {
-    const response = await this.api.post(`/work-orders/${workOrderId}/operations`, data);
+  /**
+   * Add one routing step. On a DRAFT this builds the plan; once the work order is released it
+   * is a routing change and `change_reason` is required (422 without it). Server-gated: 409 on
+   * a used sequence, a step in front of recorded work, a terminal / laser work order.
+   */
+  async addOperation(workOrderId: number, data: WorkOrderOperationAddPayload): Promise<WorkOrderOperation> {
+    const response = await this.api.post<WorkOrderOperation>(`/work-orders/${workOrderId}/operations`, data);
+    return response.data;
+  }
+
+  /**
+   * Skip a step that has not started (PENDING / READY, no recorded work). It stays on the
+   * traveler as `skipped` with who / when / why; the steps after it can proceed. Reason
+   * required (1-500 chars); refused 409 on a stale `version`.
+   */
+  async skipOperation(operationId: number, data: OperationRoutingReasonPayload): Promise<RoutingChangeResponse> {
+    const response = await this.api.post<RoutingChangeResponse>(`/work-orders/operations/${operationId}/skip`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  /** Restore a SKIPPED step to PENDING. Reason required; refused 409 in front of recorded work. */
+  async unskipOperation(operationId: number, data: OperationRoutingReasonPayload): Promise<RoutingChangeResponse> {
+    const response = await this.api.post<RoutingChangeResponse>(`/work-orders/operations/${operationId}/unskip`, data);
+    this.invalidateDashboardCache();
+    return response.data;
+  }
+
+  /**
+   * Reorder not-started steps by giving them new sequences (10-990, multiples of 10, unique
+   * across the steps that are not skipped). `operation_number` is never rewritten.
+   */
+  async resequenceOperations(
+    workOrderId: number,
+    data: OperationsResequencePayload
+  ): Promise<OperationsResequenceResponse> {
+    const response = await this.api.post<OperationsResequenceResponse>(
+      `/work-orders/${workOrderId}/operations/resequence`,
+      data
+    );
+    this.invalidateDashboardCache();
     return response.data;
   }
 

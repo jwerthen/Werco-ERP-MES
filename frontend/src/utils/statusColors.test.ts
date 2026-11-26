@@ -114,3 +114,11 @@ describe('domain-semantic guards (centralization must not re-flatten these)', ()
     expect(statusColor('damaged')).toBe(variantClass.red);
   });
 });
+
+describe('operation status: skipped', () => {
+  // A routing step taken off a released job (migration 135) is a dormant, neutral terminal.
+  it('skipped resolves to slate', () => {
+    expect(statusColor('skipped')).toBe(variantClass.slate);
+    expect(statusColorMap.skipped).toBe(variantClass.slate);
+  });
+});

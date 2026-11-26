@@ -179,8 +179,8 @@ export interface MaterialTieChipRow {
   material_tie?: DispatchMaterialTie | null;
   work_order_number?: string;
   /**
-   * The OPERATION's status (`DispatchBoardRow.status`). Only `complete` is
-   * terminal — `OperationStatus` has no cancelled/skipped member.
+   * The OPERATION's status (`DispatchBoardRow.status`). `complete` and `skipped`
+   * are terminal — a skipped step consumes no material.
    */
   status?: string | null;
 }
@@ -196,7 +196,7 @@ export interface MaterialTieChipRow {
  */
 function operationCanStillDraw(status: string | null | undefined): boolean {
   const normalized = (status || '').trim().toLowerCase();
-  return normalized !== 'complete' && normalized !== 'completed';
+  return normalized !== 'complete' && normalized !== 'completed' && normalized !== 'skipped';
 }
 
 /**

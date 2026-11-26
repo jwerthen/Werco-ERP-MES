@@ -208,6 +208,34 @@ describe('operation order within a lane', () => {
   });
 });
 
+describe('waitingOnOperation — a SKIPPED step never gates', () => {
+  it('names the real blocker, not a skipped step between it and the waiting operation', () => {
+    const routing = lane({
+      work_order_id: 3,
+      mode: 'routing',
+      operations: [
+        op({ operation_id: 1, sequence: 10, operation_number: '10', status: 'on_hold' }),
+        op({ operation_id: 2, sequence: 20, operation_number: '20', status: 'skipped' }),
+        op({ operation_id: 3, sequence: 30, operation_number: '30', status: 'pending', blocked_by_predecessor: true }),
+      ],
+    });
+    expect(waitingOnOperation(routing, routing.operations[2])?.operation_id).toBe(1);
+  });
+
+  it('waits on nothing when every earlier step is complete or skipped', () => {
+    const routing = lane({
+      work_order_id: 4,
+      mode: 'routing',
+      operations: [
+        op({ operation_id: 1, sequence: 10, operation_number: '10', status: 'complete' }),
+        op({ operation_id: 2, sequence: 20, operation_number: '20', status: 'skipped' }),
+        op({ operation_id: 3, sequence: 30, operation_number: '30', status: 'ready' }),
+      ],
+    });
+    expect(waitingOnOperation(routing, routing.operations[2])).toBeNull();
+  });
+});
+
 describe('filters', () => {
   const subject = lane({
     work_order_id: 5,

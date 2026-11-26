@@ -15,6 +15,7 @@
  *    it never renumbers them, and a move made while filtered lands relative to
  *    the lanes the user can see, inside the full plan.
  */
+import { isOperationFinished } from './routingChange';
 
 import type { DispatchBoardRow, DispatchLane, DispatchLaneOp, DispatchWorkOrderBoardResponse } from '../types';
 import { formatOperationLabel } from './operationLabel';
@@ -316,7 +317,9 @@ export function waitingOnOperation(lane: DispatchLane, op: DispatchLaneOp): Disp
   lane.operations.forEach(candidate => {
     if (candidate.operation_id === op.operation_id) return;
     if (candidate.sequence >= op.sequence) return;
-    if (String(candidate.status).toLowerCase() === 'complete') return;
+    // Finished (complete, or a SKIPPED step taken off the route) never gates — the server's
+    // `blocked_by_predecessor` ignores it too, so naming one would point at the wrong step.
+    if (isOperationFinished(candidate.status)) return;
     const gates =
       lane.mode === 'routing' ||
       candidate.on_hold ||

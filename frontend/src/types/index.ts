@@ -327,6 +327,68 @@ export interface WorkOrderOperationUpdatePayload {
   quantity_scrapped?: number;
   scrap_reason?: string;
   requires_inspection?: boolean;
+  inspection_type?: string | null;
+  /**
+   * Why a step's CONTENT changed (name, description, instructions, time standards,
+   * inspection). Required by the server (422) once the work order is no longer a DRAFT;
+   * a work-center move alone needs none.
+   */
+  change_reason?: string;
+}
+
+/**
+ * Body of `POST /work-orders/{id}/operations` — one new routing step. `change_reason` is
+ * required (422) once the work order has been released; optional and ignored on a DRAFT.
+ * `sequence` is 10-990 in multiples of 10 and may not collide with a step that is not skipped.
+ */
+export interface WorkOrderOperationAddPayload {
+  work_center_id: number;
+  sequence: number;
+  operation_number?: string | null;
+  name: string;
+  description?: string | null;
+  setup_instructions?: string | null;
+  run_instructions?: string | null;
+  setup_time_hours?: number;
+  run_time_hours?: number;
+  run_time_per_piece?: number;
+  requires_inspection?: boolean;
+  inspection_type?: string | null;
+  change_reason?: string | null;
+}
+
+/** Body of skip / unskip: the operation's current `version` and the person's reason (1-500 chars). */
+export interface OperationRoutingReasonPayload {
+  version: number;
+  reason: string;
+}
+
+/** One entry of `POST /work-orders/{id}/operations/resequence`. `operation_number` is never rewritten. */
+export interface OperationSequenceChange {
+  id: number;
+  version: number;
+  sequence: number;
+}
+
+export interface OperationsResequencePayload {
+  reason: string;
+  operations: OperationSequenceChange[];
+}
+
+/** Result of skip / unskip (`WorkOrderRoutingChangeResponse`). */
+export interface RoutingChangeResponse {
+  operation: WorkOrderOperation;
+  promoted_operation_ids: number[];
+  demoted_operation_ids: number[];
+  work_order_status: WorkOrderStatus;
+}
+
+/** Result of resequence (`WorkOrderResequenceResponse`): every operation, by sequence. */
+export interface OperationsResequenceResponse {
+  operations: WorkOrderOperation[];
+  changed_operation_ids: number[];
+  promoted_operation_ids: number[];
+  demoted_operation_ids: number[];
 }
 
 /**
@@ -398,6 +460,10 @@ export interface WorkOrderOperation extends OperationShortCountFields {
   completed_by?: number;
   laser_nest?: LaserNestInfo | null;
   cancelled_nest_id?: number | null;
+  /** Set together when the step was skipped (status `skipped`), null otherwise. UTC `Z`. */
+  skipped_at?: string | null;
+  skipped_by?: number | null;
+  skip_reason?: string | null;
   /**
    * WHY this operation is held, WHO placed the hold and WHEN.
    *
@@ -420,7 +486,14 @@ export interface WorkOrderOperation extends OperationShortCountFields {
   hold_context?: OperationHold | null;
 }
 
-export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold';
+/**
+ * `skipped` (migration 135, owner decision 2026-11-25): a routing step taken off a released
+ * job. It stays on the traveler with who / when / why (`skipped_at` / `skipped_by` /
+ * `skip_reason`), counts as FINISHED for every predecessor gate, and produced nothing — so
+ * it is left out of progress figures. Read finished-ness through `isOperationFinished`
+ * (`utils/routingChange.ts`), never `status === 'complete'` alone.
+ */
+export type OperationStatus = 'pending' | 'ready' | 'in_progress' | 'complete' | 'on_hold' | 'skipped';
 
 export interface LaserNestInfo {
   id: number;
