@@ -779,6 +779,35 @@ def get_company_open_time_entry(db: Session, user_id: int, operation_id: int, co
     )
 
 
+def operation_start_lock_query(db: Session, operation_id: int, company_id: int) -> Any:
+    """``SELECT id ... FOR UPDATE`` of one tenant-scoped operation row (``lock_operation_for_start``)."""
+    return (
+        db.query(WorkOrderOperation.id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .with_for_update()
+    )
+
+
+def lock_operation_for_start(db: Session, operation_id: int, company_id: int) -> None:
+    """Row-lock the operation a start verb is about to start, BEFORE it reads the predecessor gate.
+
+    Clock-in and both start verbs judge ``operation_blocked_by_predecessors`` over the route
+    and then write the operation. A routing change (skip / unskip / add / resequence,
+    ``routing_change_service.lock_work_order``) row-locks every operation of the work order,
+    then the work order. Without this lock a start could pass its gate over the route as it
+    was while a routing change committed a step in front of it, leaving in-progress work
+    behind an unfinished step it can never get past. With it the two serialize on this row:
+    the routing change's recorded-work guard sees a start that committed first, and a start
+    that waited reads the changed route (the caller loads the operation AFTER this call, so
+    it reads the committed row).
+
+    Only this one operation row is locked, and before the work order (OPERATION then WORK
+    ORDER, the documented order). An id-only select, so the caller's own eager-loading query
+    is unaffected. A no-op on SQLite (the tests); a real row lock on Postgres.
+    """
+    operation_start_lock_query(db, operation_id, company_id).first()
+
+
 def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation) -> bool:
     """The out-of-sequence guard, verbatim (same args as every shop-floor call site).
 

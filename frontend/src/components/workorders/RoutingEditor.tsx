@@ -107,12 +107,23 @@ export default function RoutingEditor({ workOrder, onChanged, onClose }: Routing
   // versions so the retry the server's text asks for ("Refresh and try again") can succeed.
   // Only then — a background poll must never quietly refresh the version a person is acting
   // on, or the optimistic lock would stop protecting them.
-  const adoptLiveVersions = useRef(false);
+  //
+  // `adoptFrom` holds the operation list as it stood when the refusal came back; once the
+  // refresh settles (success or failure) `refreshSettled` is bumped. That update is queued after
+  // the refresh's own state update, so the effect runs in the render that commits it, adopts only
+  // when the list actually changed, and always closes the window — so a failed refresh can never
+  // leave it open for a later background poll to re-arm the dialog with versions nobody saw.
+  const adoptFrom = useRef<WorkOrderOperation[] | null>(null);
+  const latestOperations = useRef(operations);
+  latestOperations.current = operations;
+  const [refreshSettled, setRefreshSettled] = useState(0);
   useEffect(() => {
-    if (!adoptLiveVersions.current) return;
-    adoptLiveVersions.current = false;
+    if (adoptFrom.current === null) return;
+    const before = adoptFrom.current;
+    adoptFrom.current = null;
+    if (operations === before) return;
     setReasonAction(prev => (prev ? rebuildAction(prev, operations) : prev));
-  }, [operations]);
+  }, [refreshSettled]);
 
   const submitReason = async (reason: string) => {
     if (!reasonAction || pending) return;
@@ -140,12 +151,13 @@ export default function RoutingEditor({ workOrder, onChanged, onClose }: Routing
       // Refused: the server's words, verbatim, and the dialog (with the typed reason) stays.
       showToast('error', apiErrorDetail(err, 'The routing change was not saved'));
       if (isOperationVersionConflict(err)) {
-        adoptLiveVersions.current = true;
+        adoptFrom.current = latestOperations.current;
         try {
           await onChanged();
         } catch {
-          adoptLiveVersions.current = false;
+          // The refresh failed; the settle below closes the window and adopts nothing.
         }
+        setRefreshSettled(n => n + 1);
       }
     } finally {
       setPending(false);

@@ -54,15 +54,21 @@ interface RoutingOperationModalProps {
 const FIELD = 'input w-full';
 const FIELD_ERROR = 'input-error w-full';
 
+/**
+ * The stored step as form values. Text is trimmed exactly as the schema trims what is submitted,
+ * so a stored value with stray leading/trailing whitespace (common on imported routings) never
+ * reads as a change: otherwise a work-center move alone would demand a reason and resend the text.
+ */
 function valuesFromOperation(op: WorkOrderOperation): RoutingOperationFormData {
+  const text = (value: string | null | undefined) => (value ?? '').trim();
   return {
     sequence: op.sequence,
-    operation_number: op.operation_number ?? '',
-    name: op.name ?? '',
+    operation_number: text(op.operation_number),
+    name: text(op.name),
     work_center_id: op.work_center_id,
-    description: op.description ?? '',
-    setup_instructions: op.setup_instructions ?? '',
-    run_instructions: op.run_instructions ?? '',
+    description: text(op.description),
+    setup_instructions: text(op.setup_instructions),
+    run_instructions: text(op.run_instructions),
     setup_time_hours: Number(op.setup_time_hours || 0),
     run_time_hours: Number(op.run_time_hours || 0),
     run_time_per_piece: Number(op.run_time_per_piece || 0),
@@ -117,7 +123,12 @@ export default function RoutingOperationModal({
   const [workCentersFailed, setWorkCentersFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [version, setVersion] = useState<number | undefined>(mode.kind === 'edit' ? mode.operation.version : undefined);
-  const adoptLiveVersion = useRef(false);
+  // Version adoption after a stale-version refusal: the live step as it stood when the refusal
+  // came back, and a counter bumped once that refresh settled (success or failure).
+  const adoptFrom = useRef<WorkOrderOperation | undefined | null>(null);
+  const latestLive = useRef(liveOperation);
+  latestLive.current = liveOperation;
+  const [refreshSettled, setRefreshSettled] = useState(0);
 
   const isEdit = mode.kind === 'edit';
   const editing = mode.kind === 'edit' ? mode.operation : null;
@@ -165,11 +176,15 @@ export default function RoutingOperationModal({
     // Seed only on open / target change, never on a background refetch of the work order.
   }, [open, editing?.id, reset]);
 
+  // Runs in the render that commits the refresh: setRefreshSettled is queued after the refresh's
+  // own state update, so both land together. The window then closes whatever happened — a failed
+  // refresh leaves the step unchanged and adopts nothing, and no later background poll can re-arm it.
   useEffect(() => {
-    if (!adoptLiveVersion.current || !liveOperation) return;
-    adoptLiveVersion.current = false;
-    setVersion(liveOperation.version);
-  }, [liveOperation]);
+    if (adoptFrom.current === null) return;
+    const before = adoptFrom.current;
+    adoptFrom.current = null;
+    if (liveOperation && liveOperation !== before) setVersion(liveOperation.version);
+  }, [refreshSettled]);
 
   useEffect(() => {
     if (!open) return;
@@ -274,12 +289,13 @@ export default function RoutingOperationModal({
       // Refused (or failed): keep the dialog and everything typed; show the server's words.
       showToast('error', apiErrorDetail(err, editing ? 'Could not update the step' : 'Could not add the step'));
       if (editing && isOperationVersionConflict(err) && onRefresh) {
-        adoptLiveVersion.current = true;
+        adoptFrom.current = latestLive.current;
         try {
           await onRefresh();
         } catch {
-          adoptLiveVersion.current = false;
+          // The refresh failed; the settle below closes the window and adopts nothing.
         }
+        setRefreshSettled(n => n + 1);
       }
       setSaving(false);
     }

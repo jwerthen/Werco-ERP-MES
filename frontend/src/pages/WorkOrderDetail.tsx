@@ -3204,8 +3204,10 @@ export default function WorkOrderDetail() {
                                   requiresInspection={Boolean(op.requires_inspection)}
                                   inspectionComplete={Boolean(op.inspection_complete)}
                                   inspectionType={op.inspection_type}
-                                  /* A cancelled nest keeps its chip but is not signable. */
-                                  canSignOff={canSignOff && !cancelledNest}
+                                  /* A cancelled nest keeps its chip but is not signable, and
+                                     neither is a skipped step: it never ran, so there is no
+                                     work to inspect. Restore it first. */
+                                  canSignOff={canSignOff && !cancelledNest && op.status !== 'skipped'}
                                   onSignedOff={() => loadWorkOrder()}
                                 />
                               </div>

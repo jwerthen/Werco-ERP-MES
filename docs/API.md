@@ -1349,9 +1349,12 @@ company-scoped.
 > `services/routing_change_service.py`). Four verbs — `POST /work-orders/operations/{id}/skip`,
 > `POST /work-orders/operations/{id}/unskip`, `POST /work-orders/{id}/operations` (add) and
 > `POST /work-orders/{id}/operations/resequence` — plus content edits through
-> `PUT /work-orders/operations/{id}`. Admin / Manager / Supervisor on every one; through MCP they are
-> `work_orders_skip_operation`, `work_orders_unskip_operation`, `add_operation`,
-> `work_orders_resequence_operations` and `work_orders_update_operation`.
+> `PUT /work-orders/operations/{id}`. Admin / Manager / Supervisor on every one. **Not agent
+> actions:** skip, unskip and resequence are not MCP tools (`catalog.ROUTING_CHANGE_OPERATIONS` in
+> `EXCLUDED_OPERATIONS`), `add_operation` adds steps to a DRAFT work order only (**409** otherwise),
+> and `work_orders_update_operation` takes no `change_reason`, so a content edit on a released job
+> through MCP gets the route's **422** while a work-center move still works — a routing change on a job
+> already on the floor is a person's judgment and their reason (docs/MCP.md §6.1).
 >
 > - **A reason, as required evidence.** Skip, unskip and resequence always take `reason`; add and a
 >   content edit take `change_reason`, required once the work order is no longer a DRAFT. Either is
@@ -1367,10 +1370,15 @@ company-scoped.
 >   and needs their reason: do it signed in to the app, not with an API token.`) before any write.
 >   Adding to or editing a DRAFT, and a work-center move alone (the dispatch board and scheduling use
 >   the same `PUT`), stay reason-free and open to a token.
-> - **Serialized.** Every verb row-locks the work order (`SELECT … FOR UPDATE`) before it reads the
->   route, then the operation row(s), then the audit chain lock — so two concurrent changes cannot each
->   pass a whole-route rule (two skips skipping every step). No routing verb takes the dispatch-order
->   lock: none writes `dispatch_rank` or `run_order`.
+> - **Serialized.** Before it reads the route, every verb row-locks **every operation of the work order
+>   (`SELECT … FOR UPDATE`, ascending id), then the work order row**, then (inside the audit write) the
+>   audit chain lock — the operation-then-work-order order the completion and clock-out verbs use, so a
+>   routing change and a completer never deadlock on each other. Two concurrent changes cannot each pass
+>   a whole-route rule (two skips skipping every step), and a routing change serializes with the floor:
+>   clock-in, `PUT /shop-floor/operations/{id}/start` and `POST /work-orders/operations/{id}/start`
+>   row-lock their operation before they read the predecessor gate, so a start either commits first (and
+>   the change's recorded-work guard sees it) or reads the changed route. No routing verb takes the
+>   dispatch-order lock: none writes `dispatch_rank` or `run_order`.
 > - **Refused on every verb:** **404** a missing, soft-deleted or other company's work order or
 >   operation; **409** `The routing of a complete work order cannot be changed.` (closed / cancelled
 >   likewise); **409** on a laser nest work order (add answers **400** there, as before); **409**
@@ -1395,7 +1403,11 @@ company-scoped.
 > **Skip** (`{version, reason}`): only a PENDING or READY step with no recorded work (**409** `Only a
 > step that has not started can be skipped; Op 20 is in_progress.` / `… already has recorded work (a
 > start, pieces or labor) and cannot be skipped. …`), never the last step that is not skipped (**409**
-> `A work order must keep at least one step that is not skipped. Cancel the work order instead.`).
+> `A work order must keep at least one step that is not skipped. Cancel the work order instead.`), and
+> on an **ON_HOLD** work order never the step whose skip would leave no step unfinished (**409**
+> `Resume the work order first: it is on hold, and skipping this step would leave no step unfinished,
+> which completes the work order (finished goods received) without the hold ever being lifted.`) —
+> Resume Work Order is the one door back from a hold; skipping any other step of a held job is allowed.
 > The step becomes `skipped` with `skipped_at` / `skipped_by` / `skip_reason`, releases its schedule
 > reservation, and the successors it unblocks are promoted to READY through the one promotion rule (a
 > DRAFT promotes nothing). Skipping the last open step of a job whose other steps are finished
@@ -1410,7 +1422,8 @@ company-scoped.
 >
 > **Add** (body as in the table): **409** `Sequence 20 is already used by Op 20 on this work order.
 > Pick an unused sequence.` — only a step that is not skipped holds a sequence, so a replacement may
-> take a skipped step's. On a released job the READY steps the new one blocks go back to PENDING.
+> take a skipped step's. **404** `Component part not found` for a `component_part_id` that is not one
+> of the active company's live (not deleted) parts, like the work center's **404**. On a released job the READY steps the new one blocks go back to PENDING.
 > **Resequence** (`{reason, operations: [{id, version, sequence}]}`, 1–99 entries, each id once —
 > **422** `Each operation may be listed once`; `sequence` 10–990 in multiples of 10, **422**
 > otherwise): **404** `Operation 7 is not on this work order`; **409** `Only steps that have not
@@ -1434,15 +1447,20 @@ company-scoped.
 >   ceiling never constrains the next stage), no share of the finished-quantity header, and no part of
 >   the operation progress percentage. A skipped **line item** (no component part, a share of the order)
 >   comes off what the order owes in `finished_quantity_at_all_complete` and
->   `work_order_completion_bounds`; a skipped whole-order stage or component step takes nothing off.
+>   `work_order_completion_bounds` — the two agree, including when every line item is skipped and only
+>   component steps remain (both then owe nothing); a skipped whole-order stage or component step takes
+>   nothing off.
 >   Force-complete leaves it skipped. Completion *records* (audit rows, "completed today", cycle times)
 >   still count COMPLETE alone;
 > - it **consumes nothing**: the routing backflush states no demand for it (a component drops out only
 >   when every step naming it is skipped — a live replica keeps the job's demand), and its
 >   operation-scoped open material ties are **not demand while it is skipped** in readiness and
->   reservation reads (`services/material_tie_demand.py`). The ties themselves are untouched, so a
->   restore brings them back exactly as they were. A **BOM line** for the same component still
->   backflushes: the BOM states what the finished part contains, whichever step fits it;
+>   reservation reads (`services/material_tie_demand.py`), nor in the backflush resolver: a tie on a
+>   skipped step does **not** cancel the BOM line for its part at completion or in
+>   `GET /work-orders/{id}/backflush-preview`, so completion, the preview and readiness agree. The ties
+>   themselves are untouched, so a restore brings them back exactly as they were. A **BOM line** for the
+>   same component still backflushes: the BOM states what the finished part contains, whichever step
+>   fits it;
 > - it is off the route for every other door: clock-in refuses it, both start verbs and the generic
 >   `PUT` refuse it **409** `This operation was skipped and is off the route. Restore it (Restore step on the work
 >   order) before starting, holding or editing it.`, hold refuses **409** `Cannot put a skipped
@@ -7003,7 +7021,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Viewer / Shipping get **403** `Insufficient permissions` before the operation is read or the body validated (owner decision P0.4, 2026-11-13). Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Admin / Manager / Supervisor / Operator / Quality |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
-| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. **409** (`MSG_OPERATION_SKIPPED`) for a skipped step — it never ran, so there is nothing to sign; restoring it reopens sign-off. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/time-entries` | Labor Review list: time entries by production day with review flags, server-paged (see "Labor Review" below). Pure read. A kiosk badge is **403** | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/set-clock-out` | Close or correct another person's **unapproved** entry at a stated time with a reason (hours only; see "Labor Review" below). An API token and a kiosk badge are **403**; not an MCP tool | Admin / Manager / Supervisor |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a **closed** TimeEntry (sets `approved` / `approved_by`); **409** while still clocked in; optional body `{"version": n}` → **409** when stale. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |

@@ -1072,6 +1072,27 @@ describe('DispatchWorkOrderView — operations inside a lane', () => {
     expect(screen.getByLabelText('Move Op 25 Tack weld to another machine')).toBeDisabled();
   });
 
+  it('a skipped step on a pool lane cannot be moved to another machine (the server refuses every write to it)', async () => {
+    const user = userEvent.setup();
+    const laneA = LANE_A();
+    laneA.operations = laneA.operations.map(candidate =>
+      candidate.operation_id === 3102 ? { ...candidate, status: 'skipped', run_position: null } : candidate
+    );
+    mockApi.getDispatchWorkOrderBoard.mockResolvedValue(
+      makeBoard([laneA, LANE_B(), LANE_C(), LANE_D(), LANE_E(), LANE_F()])
+    );
+    renderPage();
+    await waitForBoard();
+    await expand(user, 'WO-20261103-004');
+
+    const select = screen.getByLabelText('Move Op 20 Brake form gusset to another machine');
+    expect(select).toBeDisabled();
+    expect(select).toHaveAttribute('title', 'Skipped steps are off the route; restore the step first.');
+    // A step that is still on the route keeps its control.
+    expect(screen.getByLabelText('Move Op 10 Brake form flange to another machine')).toBeEnabled();
+    expect(mockApi.updateOperation).not.toHaveBeenCalled();
+  });
+
   it("an UNPLANNED work order's moved operation is announced as unranked work, never as a plan block", async () => {
     const user = userEvent.setup();
     mockApi.updateOperation.mockResolvedValue({});

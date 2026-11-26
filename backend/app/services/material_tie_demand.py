@@ -15,7 +15,9 @@ READ, through this one predicate, never by rewriting the tie:
 * ``tie_is_live_demand_clause()`` -- the SQL half, for reservation reads that select ties
   with a query (``owned_property_service._open_ties``, the combine's reservation read);
 * ``live_demand_ties()`` -- the Python half, for a reader that already holds the ties and
-  the operations (``material_readiness_service``).
+  the operations (``material_readiness_service``, and the backflush resolver's tie-covered
+  drop in ``completion_inventory_service``, so a skipped step's tie never cancels BOM demand
+  at completion or in the preview while readiness reports it as needed).
 
 A work-order-scoped tie (``work_order_operation_id IS NULL``) is never affected.
 Pure reads; nothing here writes.

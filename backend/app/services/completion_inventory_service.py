@@ -105,6 +105,7 @@ from app.models.shipping import Shipment, ShipmentStatus
 from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
 from app.models.work_order_material import WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
+from app.services.material_tie_demand import live_demand_ties
 from app.services.operational_event_service import OperationalEventService
 from app.services.owned_property_service import COMPANY, COMPANY_OWNERSHIP_KEY, ownership_match_clauses
 from app.services.work_order_state_service import is_laser_dispatch_work_order
@@ -2114,6 +2115,7 @@ def _drop_allocation_covered_parts(
             WorkOrderOperation.id,
             WorkOrderOperation.quantity_complete,
             WorkOrderOperation.quantity_scrapped,
+            WorkOrderOperation.status,
         )
         .filter(
             WorkOrderOperation.company_id == company_id,
@@ -2122,6 +2124,12 @@ def _drop_allocation_covered_parts(
         )
         .all()
     }
+    # A tie on a SKIPPED step is not demand (``material_tie_demand``, owner decision
+    # 2026-11-25): it can never consume (its target is qty_per_run x 0), so it must not cancel
+    # the BOM's demand either -- the BOM line still backflushes when the routing step naming
+    # its material is skipped. The same predicate readiness applies, so completion, the
+    # preview and readiness agree. Such a tie is simply not a carrier: no diagnostic.
+    allocations = live_demand_ties(allocations, list(live_operations.values()))
     for allocation in allocations:
         operation = live_operations.get(allocation.work_order_operation_id)
         if operation is not None:

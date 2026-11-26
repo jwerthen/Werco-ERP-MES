@@ -175,6 +175,7 @@ from app.services.operation_action_gates import (
     exceeds_recorded_message,
     get_open_time_entry,
     good_above_ceiling_message,
+    lock_operation_for_start,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
     others_clocked_in_message,
@@ -1769,6 +1770,10 @@ def clock_in(
 
     if existing:
         raise HTTPException(status_code=400, detail="You are already clocked in to this operation.")
+
+    # Row-locked before the predecessor gate below is read, so a concurrent routing change
+    # (skip / unskip / add / resequence) and this clock-in serialize (lock_operation_for_start).
+    lock_operation_for_start(db, clock_in_data.operation_id, company_id)
 
     # Verify work order and operation (scoped to the active company so a guessed
     # foreign operation_id cannot drive another tenant's operation/WO IN_PROGRESS)
@@ -4394,6 +4399,9 @@ def start_operation(
     complete / closed / cancelled; **409** when the OPERATION is on hold -- starting does
     not lift a hold, Resume / Clear Hold does; earlier operations incomplete (400).
     """
+    # Row-locked before the predecessor gate is read (lock_operation_for_start): a concurrent
+    # routing change cannot put an unfinished step in front of the start it judged.
+    lock_operation_for_start(db, operation_id, company_id)
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -6020,6 +6028,10 @@ def mark_operation_inspected(
     # else, and a sign-off on it would be evidence for work nobody can see.
     if not operation or not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Operation not found")
+    # A skipped step never ran, so there is nothing to have inspected: a sign-off on it would be
+    # quality evidence for work that did not happen. Restoring the step reopens it to sign-off.
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
 
     was_complete = bool(operation.inspection_complete)
     old_type = operation.inspection_type

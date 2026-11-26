@@ -182,4 +182,15 @@ describe('WorkOrderDetail inspection sign-off', () => {
     expect(within(row).getByText('inspection required')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Sign off inspection/ })).not.toBeInTheDocument();
   });
+
+  it('keeps the chip but offers no Sign off on a skipped step (it never ran)', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue({
+      ...workOrder(false),
+      operations: [{ ...inspectionOp(false), status: 'skipped', skip_reason: 'Not on this rev' }, plainOp],
+    });
+    renderDetail();
+    const row = (await screen.findByText('Deburr')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('inspection required')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Sign off inspection/ })).not.toBeInTheDocument();
+  });
 });

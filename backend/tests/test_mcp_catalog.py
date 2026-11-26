@@ -40,6 +40,8 @@ from app.mcp.catalog import (
     MAX_DESCRIPTION_CHARS,
     MULTIPART_CONTENT_TYPE,
     PUBLIC_OPERATIONS,
+    ROUTING_CHANGE_OPERATIONS,
+    WITHHELD_BODY_FIELDS,
     GeneratedTool,
     build_catalog,
     build_tool,
@@ -160,8 +162,9 @@ class TestMembership:
         # self-service password change (a person's act in their own session), the in-process
         # inspection sign-off (AS9100D 8.6: signing that an inspection was performed is a person's
         # judgment, like an FAI final disposition), the three labor judgments (approve / unapprove
-        # a time entry, set another person's clock-out) and issuing a Certificate of Conformance
-        # (a person's conformance judgment) -- nothing else.
+        # a time entry, set another person's clock-out), issuing a Certificate of Conformance
+        # (a person's conformance judgment) and the three routing changes on a released work order
+        # (skip, restore, resequence: a person's judgment, with their reason) -- nothing else.
         assert set(EXCLUDED_OPERATIONS) == {
             ("POST", "/api/v1/work-orders/import"),
             ("POST", "/api/v1/purchasing/purchase-orders/import"),
@@ -199,6 +202,10 @@ class TestMembership:
             ("POST", "/api/v1/shop-floor/time-entries/{time_entry_id}/set-clock-out"),
             # Issuing a Certificate of Conformance (shipping/2): a person's conformance judgment.
             ("POST", "/api/v1/shipping/{shipment_id}/coc"),
+            # Routing changes on a released work order (2026-11-25): skip, restore, resequence.
+            ("POST", "/api/v1/work-orders/operations/{operation_id}/skip"),
+            ("POST", "/api/v1/work-orders/operations/{operation_id}/unskip"),
+            ("POST", "/api/v1/work-orders/{work_order_id}/operations/resequence"),
         }
         assert EGRESS_SWITCH_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert INSPECTION_SIGN_OFF_OPERATIONS <= set(EXCLUDED_OPERATIONS)
@@ -206,6 +213,7 @@ class TestMembership:
         assert DOCUMENT_ACCESS_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert COMMENT_WRITE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
         assert FLOOR_PIN_OPERATIONS <= set(EXCLUDED_OPERATIONS)
+        assert ROUTING_CHANGE_OPERATIONS <= set(EXCLUDED_OPERATIONS)
 
     def test_flipping_an_egress_kill_switch_is_never_a_tool(self, catalog):
         """Lead decision 2026-11-15: an egress kill switch is a person's judgment. The routes
@@ -585,7 +593,9 @@ class TestInputSchemas:
             if raw is None:
                 continue
             sent = {tool.body_property_map.get(name, name) for name in tool.body_properties}
-            assert sent == raw, tool.name
+            # A field named in WITHHELD_BODY_FIELDS is deliberately not a tool argument
+            # (``change_reason`` on the operation update: a person's reason, never an agent's).
+            assert sent == raw - WITHHELD_BODY_FIELDS.get((method, path), frozenset()), tool.name
             checked += 1
         assert checked > 150, "the comparison must cover the bulk of the JSON-body tools"
         ncr = by_key[("POST", "/api/v1/quality/ncr")]

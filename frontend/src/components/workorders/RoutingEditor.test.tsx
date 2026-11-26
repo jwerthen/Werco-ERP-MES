@@ -414,3 +414,164 @@ describe('edit step', () => {
     );
   });
 });
+
+describe('edit step with stored whitespace', () => {
+  it('treats a trailing space or newline on stored text as unchanged: a work-center move alone needs no reason', async () => {
+    const user = userEvent.setup();
+    mockedApi.getWorkCenters.mockResolvedValue([
+      ...WORK_CENTERS,
+      { ...WORK_CENTERS[0], id: 10, code: 'WELD-2', name: 'Weld Cell 2' } as WorkCenter,
+    ]);
+    mockedApi.updateOperation.mockResolvedValue({});
+    const operations = OPERATIONS.map(candidate =>
+      candidate.id === 13
+        ? {
+            ...candidate,
+            name: 'Deburr ',
+            description: 'Break all edges \n',
+            setup_instructions: ' Fixture A',
+            run_instructions: 'Run slow\n',
+          }
+        : candidate
+    );
+    renderEditor(workOrder({ operations }));
+
+    await user.click(screen.getByRole('button', { name: 'Edit Op 30' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByRole('option', { name: /WELD-2/ });
+    await user.selectOptions(within(dialog).getByLabelText(/^Work center/), '10');
+    await user.click(within(dialog).getByRole('button', { name: 'Save step' }));
+
+    await waitFor(() => expect(mockedApi.updateOperation).toHaveBeenCalledWith(13, { version: 7, work_center_id: 10 }));
+  });
+});
+
+describe('version adoption after a stale-version refusal', () => {
+  const STALE = 'Operation was modified by someone else. Refresh and try again.';
+
+  /** Holds the work order in state, as WorkOrderDetail does, so a "poll" can replace it. */
+  function StatefulEditor({
+    initial,
+    refresh,
+    setterRef,
+  }: {
+    initial: WorkOrder;
+    refresh: (set: (wo: WorkOrder) => void) => Promise<void>;
+    setterRef: { current: ((wo: WorkOrder) => void) | null };
+  }) {
+    const [wo, setWo] = React.useState(initial);
+    setterRef.current = setWo;
+    return (
+      <ToastProvider>
+        <RoutingEditor workOrder={wo} onChanged={() => refresh(setWo)} onClose={jest.fn()} />
+      </ToastProvider>
+    );
+  }
+
+  const withVersion = (id: number, version: number) =>
+    workOrder({
+      operations: OPERATIONS.map(candidate => (candidate.id === id ? { ...candidate, version } : candidate)),
+    });
+
+  async function skipOp20(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Skip Op 20' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByLabelText(/Reason/), 'why');
+    await user.click(within(dialog).getByRole('button', { name: 'Skip step' }));
+    return dialog;
+  }
+
+  it('adopts the fresh version when the refresh succeeds', async () => {
+    const user = userEvent.setup();
+    mockedApi.skipOperation.mockRejectedValueOnce(httpError(409, STALE));
+    const setterRef: { current: ((wo: WorkOrder) => void) | null } = { current: null };
+    render(
+      <StatefulEditor
+        initial={workOrder()}
+        setterRef={setterRef}
+        refresh={async set => {
+          set(withVersion(12, 5));
+        }}
+      />
+    );
+
+    const dialog = await skipOp20(user);
+    expect(await screen.findByText(STALE)).toBeInTheDocument();
+    mockedApi.skipOperation.mockResolvedValue(routingChange({ ...OPERATIONS[1], status: 'skipped' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Skip step' }));
+
+    await waitFor(() => expect(mockedApi.skipOperation).toHaveBeenLastCalledWith(12, { version: 5, reason: 'why' }));
+  });
+
+  it('does not let a later background poll re-arm the dialog after a failed refresh', async () => {
+    const user = userEvent.setup();
+    mockedApi.skipOperation.mockRejectedValue(httpError(409, STALE));
+    const setterRef: { current: ((wo: WorkOrder) => void) | null } = { current: null };
+    // Like WorkOrderDetail.loadWorkOrder: a failed re-read resolves without changing the record.
+    render(<StatefulEditor initial={workOrder()} setterRef={setterRef} refresh={async () => undefined} />);
+
+    const dialog = await skipOp20(user);
+    expect(await screen.findByText(STALE)).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Skip step' })).toBeEnabled());
+
+    // A background poll lands with a version the person never saw.
+    React.act(() => setterRef.current?.(withVersion(12, 9)));
+    await user.click(within(dialog).getByRole('button', { name: 'Skip step' }));
+
+    await waitFor(() => expect(mockedApi.skipOperation).toHaveBeenCalledTimes(2));
+    expect(mockedApi.skipOperation).toHaveBeenLastCalledWith(12, { version: 2, reason: 'why' });
+  });
+
+  it('edit dialog: a failed refresh does not let a later poll change the version it sends', async () => {
+    const user = userEvent.setup();
+    mockedApi.updateOperation.mockRejectedValue(httpError(409, STALE));
+    const setterRef: { current: ((wo: WorkOrder) => void) | null } = { current: null };
+    render(<StatefulEditor initial={workOrder()} setterRef={setterRef} refresh={async () => undefined} />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Op 30' }));
+    const dialog = await screen.findByRole('dialog');
+    const name = within(dialog).getByLabelText(/^Name/);
+    await user.clear(name);
+    await user.type(name, 'Deburr + edges');
+    await user.type(within(dialog).getByLabelText(/^Reason for the change/), 'note');
+    await user.click(within(dialog).getByRole('button', { name: 'Save step' }));
+    expect(await screen.findByText(STALE)).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Save step' })).toBeEnabled());
+
+    React.act(() => setterRef.current?.(withVersion(13, 9)));
+    await user.click(within(dialog).getByRole('button', { name: 'Save step' }));
+
+    await waitFor(() => expect(mockedApi.updateOperation).toHaveBeenCalledTimes(2));
+    expect(mockedApi.updateOperation).toHaveBeenLastCalledWith(13, expect.objectContaining({ version: 7 }));
+  });
+
+  it('edit dialog: adopts the fresh version when the refresh succeeds', async () => {
+    const user = userEvent.setup();
+    mockedApi.updateOperation.mockRejectedValueOnce(httpError(409, STALE)).mockResolvedValue({});
+    const setterRef: { current: ((wo: WorkOrder) => void) | null } = { current: null };
+    render(
+      <StatefulEditor
+        initial={workOrder()}
+        setterRef={setterRef}
+        refresh={async set => {
+          set(withVersion(13, 8));
+        }}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Edit Op 30' }));
+    const dialog = await screen.findByRole('dialog');
+    const name = within(dialog).getByLabelText(/^Name/);
+    await user.clear(name);
+    await user.type(name, 'Deburr + edges');
+    await user.type(within(dialog).getByLabelText(/^Reason for the change/), 'note');
+    await user.click(within(dialog).getByRole('button', { name: 'Save step' }));
+    expect(await screen.findByText(STALE)).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Save step' })).toBeEnabled());
+    await user.click(within(dialog).getByRole('button', { name: 'Save step' }));
+
+    await waitFor(() =>
+      expect(mockedApi.updateOperation).toHaveBeenLastCalledWith(13, expect.objectContaining({ version: 8 }))
+    );
+  });
+});

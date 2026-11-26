@@ -181,6 +181,7 @@ from app.services.operation_action_gates import (
     force_complete_exceeds_physical_message,
     force_complete_exceeds_recorded_message,
     force_complete_unaccounted_message,
+    lock_operation_for_start,
     no_labor_reduction_exceeds_message,
     office_no_change_message,
     open_count_above_ceiling_message,
@@ -6360,18 +6361,13 @@ def add_operation(
     new one now blocks go back to PENDING (audited); the new step itself becomes READY when its
     predecessors are finished. **404** for a missing or deleted work order or another company's
     work center; **409** for a complete / closed / cancelled work order; **400** for a laser
-    nest work order (add a nest instead).
+    nest work order (add a nest instead). **404** also for a ``component_part_id`` that is not one
+    of this company's live parts.
     """
-    # Row-locked: every routing change on one work order serializes (routing_change_service.lock_work_order).
-    work_order = (
-        db.query(WorkOrder)
-        .filter(
-            WorkOrder.id == work_order_id, WorkOrder.company_id == company_id, WorkOrder.is_deleted == False
-        )  # noqa: E712
-        .with_for_update()
-        .first()
-    )
-    if not work_order:
+    # Row-locked: every routing change on one work order serializes, operation rows first and then
+    # the work order row (routing_change_service.lock_work_order).
+    work_order = routing_change_service.lock_work_order(db, work_order_id, company_id)
+    if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
 
     # Laser nest WOs are DISPATCH POOLS whose every op is a nest, exempt from
@@ -6388,6 +6384,14 @@ def add_operation(
     # Tenancy: the work center is caller-supplied, so it must be proven to belong
     # to the active company before it is written onto the row.
     _assert_work_center_in_company(db, operation_in.work_center_id, company_id)
+    # The component part is caller-supplied too: a foreign (or deleted) part id must never be
+    # written onto this company's routing. 404, like the work center: indistinguishable from none.
+    if operation_in.component_part_id is not None:
+        component = tenant_parts_by_id(db, [operation_in.component_part_id], company_id).get(
+            operation_in.component_part_id
+        )
+        if component is None or component.is_deleted:
+            raise HTTPException(status_code=404, detail="Component part not found")
 
     audit = AuditService(db, current_user, request)
     values = operation_in.model_dump(exclude={"change_reason"})
@@ -6446,8 +6450,10 @@ def skip_operation(
     DRAFT work order too. Refused: **404** operation or work order missing / deleted; **409**
     stale version, a complete / closed / cancelled work order, a laser nest work order, a step
     that is not PENDING or READY, a step with recorded work (a start, pieces or any labor), the
-    last step that is not skipped, or a skip that would strand a short-count close; **403** any
-    API token (a routing change is a person's judgment).
+    last step that is not skipped, a skip that would leave an ON_HOLD work order with no
+    unfinished step (it would complete a held job: resume the work order first), or a skip that
+    would strand a short-count close; **403** any API token (a routing change is a person's
+    judgment).
     """
     operation = routing_change_service.load_operation(db, operation_id, company_id)
     audit = AuditService(db, current_user, request)
@@ -6531,15 +6537,9 @@ def resequence_operations(
     audit row per moved step (**503**, nothing saved, when one cannot be). **409** for a terminal
     or laser work order; **403** any API token.
     """
-    work_order = (
-        db.query(WorkOrder)
-        .filter(
-            WorkOrder.id == work_order_id, WorkOrder.company_id == company_id, WorkOrder.is_deleted == False
-        )  # noqa: E712
-        .with_for_update()
-        .first()
-    )
-    if not work_order:
+    # Operation rows first, then the work order row (routing_change_service.lock_work_order).
+    work_order = routing_change_service.lock_work_order(db, work_order_id, company_id)
+    if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
     audit = AuditService(db, current_user, request)
     with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
@@ -7311,6 +7311,9 @@ def start_operation(
     enforces -- except when such a predecessor is **ON_HOLD**, which blocks from any work
     center. Laser dispatch-pool work orders are exempt from the gate entirely.
     """
+    # Row-locked before the predecessor gate is read (lock_operation_for_start): a concurrent
+    # routing change cannot put an unfinished step in front of the start it judged.
+    lock_operation_for_start(db, operation_id, company_id)
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))

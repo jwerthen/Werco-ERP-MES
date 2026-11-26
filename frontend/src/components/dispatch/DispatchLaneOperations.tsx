@@ -432,6 +432,9 @@ function PoolOperationRow({
   const queued = queuedIndex >= 0;
   const running = opIsRunning(op);
   const complete = opStatus(op) === 'complete';
+  // A skipped step is off the route: the server refuses every write to it
+  // (machine moves included) until it is restored.
+  const skipped = opStatus(op) === 'skipped';
   const reorderReason = !canEdit
     ? ROLE_PIN_REASON
     : blockedReason
@@ -450,9 +453,11 @@ function PoolOperationRow({
       ? RUNNING_MOVE_REASON
       : complete
         ? 'Completed operations cannot be moved to another work center.'
-        : busy
-          ? SAVING_REASON
-          : undefined;
+        : skipped
+          ? 'Skipped steps are off the route; restore the step first.'
+          : busy
+            ? SAVING_REASON
+            : undefined;
   const nestSegments = nestDetailSegments(op.laser_nest);
   const tieChip = materialTieChip(op);
   const crew = crewText(op);
@@ -573,7 +578,7 @@ function PoolOperationRow({
               <select
                 aria-label={`Move ${label} to another machine`}
                 title={moveReason || 'Move this operation to another machine'}
-                disabled={running || complete || targets.length === 0}
+                disabled={running || complete || skipped || targets.length === 0}
                 aria-disabled={busy || undefined}
                 value=""
                 onChange={event => {

@@ -367,6 +367,17 @@ export default function PrintTraveler() {
                   <div>
                     <div className="font-bold">SKIPPED — do not run</div>
                     {op.skip_reason && <div className="text-gray-600">{op.skip_reason}</div>}
+                    {/* Who and when, so the paper record carries the whole decision. */}
+                    {(op.skipped_by_name || op.skipped_by != null || op.skipped_at) && (
+                      <div className="text-gray-600">
+                        {[
+                          op.skipped_by_name || (op.skipped_by != null ? `User #${op.skipped_by}` : null),
+                          op.skipped_at ? formatCentralDateTime(op.skipped_at) : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <>

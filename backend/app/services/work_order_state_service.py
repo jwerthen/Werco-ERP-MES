@@ -1963,7 +1963,11 @@ def work_order_completion_bounds(
         # A SKIPPED line item's pieces were never made and are not owed (the header twin above).
         skipped_lines = _skipped_line_item_target(work_order, operations)
     targets = [operation_target_quantity(op, work_order) for op in lines]
-    if lines and abs(sum(targets) + skipped_lines - ordered) <= QTY_EPSILON:
+    # Entered on skipped line items alone too (every line item skipped, only component steps
+    # left): the header twin enters on ``skipped_lines`` alone, and the two must agree --
+    # otherwise force-complete could book the whole order while the all-complete header books
+    # what is owed (nothing, when every line was skipped).
+    if (lines or skipped_lines > QTY_EPSILON) and abs(sum(targets) + skipped_lines - ordered) <= QTY_EPSILON:
         owed = max(0.0, ordered - skipped_lines)
         caps = []
         floor_loss = 0.0

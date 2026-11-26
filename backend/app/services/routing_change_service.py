@@ -53,6 +53,7 @@ from app.services.operation_action_gates import accounting_strand_message, opera
 from app.services.work_order_state_service import (
     TERMINAL_WO_STATUSES,
     active_operation_id,
+    active_work_order_operations,
     demote_ready_operations,
     is_laser_dispatch_work_order,
     is_operation_finished,
@@ -70,6 +71,10 @@ from app.services.work_order_state_service import (
 # The required-audit 503 text every verb answers when its evidence cannot be written.
 ROUTING_AUDIT_UNAVAILABLE = "The audit record for this routing change could not be saved; nothing was changed. Retry."
 OPERATION_VERSION_CONFLICT = "Operation was modified by someone else. Refresh and try again."
+SKIP_WOULD_COMPLETE_HELD_WORK_ORDER = (
+    "Resume the work order first: it is on hold, and skipping this step would leave no step unfinished, which "
+    "completes the work order (finished goods received) without the hold ever being lifted."
+)
 SKIPPABLE_STATUSES = (OperationStatus.PENDING, OperationStatus.READY)
 REORDERABLE_STATUSES = (OperationStatus.PENDING, OperationStatus.READY)
 
@@ -120,31 +125,70 @@ def assert_routing_changeable(work_order: Optional[WorkOrder]) -> WorkOrder:
 
 
 def work_order_lock_query(db: Session, work_order_id: int, company_id: int) -> Query:
-    """``SELECT ... FOR UPDATE`` of one tenant-scoped work order row (the routing-change lock)."""
-    return tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == work_order_id).with_for_update()
+    """``SELECT ... FOR UPDATE`` of one tenant-scoped work order row (taken AFTER its operation rows)."""
+    return (
+        tenant_query(db, WorkOrder, company_id)
+        .filter(WorkOrder.id == work_order_id)
+        .populate_existing()
+        .with_for_update()
+    )
+
+
+def operation_rows_lock_query(db: Session, work_order_id: int, company_id: int) -> Query:
+    """``SELECT ... ORDER BY id FOR UPDATE`` of every tenant-scoped operation of one work order (taken FIRST).
+
+    Ascending id: Postgres locks the rows in the sorted order, so two lockers of overlapping
+    operation sets always meet in the same order.
+    """
+    return (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.work_order_id == work_order_id)
+        .order_by(WorkOrderOperation.id)
+        .populate_existing()
+        .with_for_update()
+    )
 
 
 def lock_work_order(db: Session, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
-    """Row-lock the work order every routing-change verb serializes on, or ``None``.
+    """Row-lock the route every routing-change verb serializes on, and return the work order (or ``None``).
 
     Every verb's guards read the WHOLE route (at least one step stays not skipped, no
     sequence collision, nothing lands in front of recorded work, no strand), so two
     concurrent changes judged over two unlocked snapshots could each pass and together
-    break the rule -- two skips skipping every step. All four verbs therefore take this one
-    lock before their first read of the route: skip / unskip through ``load_operation``, add
-    and resequence in their routers. Lock order is the work order row FIRST, then the
-    operation row(s), then the audit chain lock (taken inside ``log_required``, always last).
-    The dispatch-order lock is not taken: no routing verb writes ``dispatch_rank`` or
+    break the rule -- two skips skipping every step. All four verbs therefore take this lock
+    before their first read of the route: skip / unskip through ``load_operation``, add and
+    resequence in their routers.
+
+    **Lock order: every operation row of the work order (``FOR UPDATE``, ascending id), THEN
+    the work order row, then the audit chain lock** (taken inside ``log_required``, always
+    last). That is the OPERATION-then-WORK-ORDER order the completion and clock-out verbs
+    already use, so a routing change and a completer never each hold one row and wait on the
+    other. Locking the operation rows, not only the work order, is what serializes a routing
+    change against the floor: clock-in and both start verbs row-lock their operation before
+    they read the predecessor gate (``operation_action_gates.lock_operation_for_start``). The
+    start either commits first and this verb's recorded-work guard sees it, or this verb
+    commits first and the start's gate reads the changed route.
+
+    After the work order lock, the operation rows are locked once more. A step that another
+    routing change inserted while this one waited (it held the work order then) is not in
+    the first pass's snapshot. Rows this transaction already holds are re-locked at no cost.
+    ``populate_existing`` re-reads every locked row, so no guard judges a stale identity-map
+    copy. The dispatch-order lock is not taken: no routing verb writes ``dispatch_rank`` or
     ``run_order``.
     """
-    return work_order_lock_query(db, work_order_id, company_id).first()
+    operation_rows_lock_query(db, work_order_id, company_id).all()
+    work_order = work_order_lock_query(db, work_order_id, company_id).first()
+    if work_order is not None:
+        operation_rows_lock_query(db, work_order_id, company_id).all()
+    return work_order
 
 
 def load_operation(db: Session, operation_id: int, company_id: int) -> WorkOrderOperation:
     """The tenant-scoped operation, or 404 (another company's id is indistinguishable from none).
 
-    Locks the operation's WORK ORDER row first (``lock_work_order``), then the operation row,
-    so skip / unskip serialize with every other routing change on the same work order.
+    Locks the operation's whole route first (``lock_work_order``: every operation row of its
+    work order, then the work order row), so skip / unskip serialize with every other routing
+    change on the same work order and with the floor's start verbs.
     """
     work_order_id = (
         tenant_query(db, WorkOrderOperation, company_id)
@@ -155,10 +199,11 @@ def load_operation(db: Session, operation_id: int, company_id: int) -> WorkOrder
     if work_order_id is None:
         raise HTTPException(status_code=404, detail="Operation not found")
     lock_work_order(db, work_order_id, company_id)
+    # Already locked and re-read by the route lock; this resolves the row and re-checks it is
+    # still on that work order.
     operation = (
         tenant_query(db, WorkOrderOperation, company_id)
         .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.work_order_id == work_order_id)
-        .with_for_update()
         .first()
     )
     if operation is None:
@@ -291,6 +336,16 @@ def skip_operation(
             status_code=409,
             detail="A work order must keep at least one step that is not skipped. Cancel the work order instead.",
         )
+    # A skip that leaves nothing unfinished completes the work order (the route then runs the
+    # completion reconcile: FG receipt, backflush, cost). On a held job that would carry
+    # quality- or material-held product to stock without anyone lifting the hold, so it is
+    # refused; Resume Work Order is the one door back from a hold. Skipping any other step of
+    # a held job stays allowed -- it completes nothing.
+    if work_order.status == WorkOrderStatus.ON_HOLD and not any(
+        op.id != operation.id and not is_operation_finished(op.status)
+        for op in active_work_order_operations(work_order)
+    ):
+        raise HTTPException(status_code=409, detail=SKIP_WOULD_COMPLETE_HELD_WORK_ORDER)
     after = [operation_what_if(op, status=OperationStatus.SKIPPED) if op.id == operation.id else op for op in route]
     _refuse_strand(work_order, route, after)
 
