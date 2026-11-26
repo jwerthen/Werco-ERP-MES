@@ -85,7 +85,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Container, Iterable, Optional, Sequence, TypeVar, cast
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
@@ -1233,14 +1233,21 @@ def _routing_backflush_demand(
       ISSUE the part the finished-goods leg just RECEIVED, netting the job's own output
       out of stock and writing the produced part into its own as-built record.
 
-    Operation STATUS is deliberately not filtered. ``OperationStatus`` has no cancelled or
-    skipped member, so no status means "this work did not happen"; the quantity is
-    job-scoped and replicated, so filtering would change the JOB's demand according to
-    which replica happened to survive; and at work-order completion every operation is
-    terminal by construction (force-complete stamps the stragglers). A non-COMPLETE
-    operation contributing demand is logged instead, because the only way it happens is a
-    completion path that closed the work order without closing its operations -- a
-    production-record defect worth surfacing rather than silently absorbing.
+    **A SKIPPED operation states no demand** (owner decision 2026-11-25: a step taken off a
+    released job is SKIPPED, never deleted, and a skipped step consumes nothing). It is the
+    one status filtered here, because it is the one status that means "this work did not
+    happen". Because the quantity is job-scoped and REPLICATED, a skipped replica changes
+    nothing while another operation still names the same component; only a component every
+    naming operation of which was skipped drops out of the routing demand. The BOM leg is
+    untouched by this: a BOM line states what the finished part contains, independently of
+    which routing step makes or fits it, so a BOM line for that component still applies.
+
+    Every other status is deliberately not filtered: filtering would change the JOB's
+    demand according to which replica happened to survive, and at work-order completion
+    every non-skipped operation is terminal by construction (force-complete stamps the
+    stragglers). A non-COMPLETE operation contributing demand is logged instead, because the
+    only way it happens is a completion path that closed the work order without closing its
+    operations -- a production-record defect worth surfacing rather than silently absorbing.
     """
     operations = (
         db.query(WorkOrderOperation)
@@ -1248,6 +1255,8 @@ def _routing_backflush_demand(
             WorkOrderOperation.work_order_id == work_order.id,
             WorkOrderOperation.company_id == company_id,
             WorkOrderOperation.component_part_id.isnot(None),
+            # NULL-safe: a legacy NULL status is not a skip (``!=`` alone would drop it).
+            or_(WorkOrderOperation.status.is_(None), WorkOrderOperation.status != OperationStatus.SKIPPED),
         )
         .all()
     )

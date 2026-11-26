@@ -163,15 +163,16 @@ API_TOKEN_COMMENT_WRITE = (
 )
 
 # Routing changes on a released job (owner decision 2026-11-25): skipping a step, restoring one,
-# resequencing, and -- on a work order that is no longer a DRAFT -- adding a step each need a reason a
-# person typed, so every one of those writes refuses ANY API token 403 with this text before it writes
-# anything (editing a step's content on a released job needs ``change_reason`` but is not token-fenced)
-# (``app.services.routing_change_service``). Adding a step to a DRAFT work order is unchanged
-# (the plan is still being built, and ``create_work_order`` + ``add_operation`` is the agent
-# path). A crew-station badge token never reaches these routes (its path fence keeps it on the
-# shop floor).
+# resequencing, and -- on a work order that is no longer a DRAFT -- adding a step or editing a step's
+# CONTENT through ``PUT /work-orders/operations/{id}`` (name, description, instructions, time
+# standards, inspection) each need a reason a person typed, so every one of those writes refuses ANY
+# API token 403 with this text before it writes anything (``app.services.routing_change_service``;
+# the PUT's ``ROUTING_CONTENT_FIELDS``). Adding a step to, or editing one on, a DRAFT work order is
+# unchanged (the plan is still being built, and ``create_work_order`` + ``add_operation`` is the agent
+# path), and so is a work-center move alone (the dispatch board and scheduling use that PUT). A
+# crew-station badge token never reaches these routes (its path fence keeps it on the shop floor).
 API_TOKEN_ROUTING_CHANGE = (
-    "Changing a released work order's routing (skipping, restoring, adding or reordering a step) is a "
+    "Changing a released work order's routing (skipping, restoring, adding, reordering or editing a step) is a "
     "person's judgment and needs their reason: do it signed in to the app, not with an API token."
 )
 

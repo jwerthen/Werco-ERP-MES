@@ -147,6 +147,7 @@ from app.models.work_order import WorkOrder
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.services.audit_service import AuditService
 from app.services.material_consumption_service import AVAILABLE_ITEM_STATUS, is_consumable_item
+from app.services.material_tie_demand import tie_is_live_demand_clause
 from app.services.operational_event_service import OperationalEventService
 from app.services.owned_property_service import COMPANY, OwnershipKey, ownership_key, ownership_label
 from app.services.sheet_stock_spec import (
@@ -786,6 +787,8 @@ def source_reservations(db: Session, company_id: int, part_id: int) -> SourceRes
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status.notin_(TERMINAL_WO_STATUSES),
+            # A SKIPPED step's ties draw nothing while it stays skipped (material_tie_demand).
+            tie_is_live_demand_clause(),
         )
         .order_by(WorkOrderMaterialAllocation.id.asc())
         .all()

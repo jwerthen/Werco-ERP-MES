@@ -34,7 +34,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.api.endpoints.bom import tenant_parts_by_id
 from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
-from app.core.credentials import is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import API_TOKEN_ROUTING_CHANGE, is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
@@ -984,8 +984,25 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
     with db.no_autoflush:
         labor_evidence = operation_labor_evidence(db, company_id, [op.id for op in work_order.operations])
 
+    # WHO SKIPPED a step (routing change on a released job, migration 135): ``skipped_by`` is an
+    # id; the display name comes from ONE batched, tenant-scoped User read, skipped entirely when
+    # nothing is skipped (the common path costs zero queries). Same display form as
+    # ``held_by_name`` ("Dana R."). Under ``no_autoflush``: a render must never flush.
+    skipper_ids = {op.skipped_by for op in work_order.operations if op.skipped_by is not None}
+    skipper_names: Dict[int, Optional[str]] = {}
+    if skipper_ids:
+        with db.no_autoflush:
+            skipper_names = {
+                user_id: operator_display_name(first_name, last_name)
+                for user_id, first_name, last_name in tenant_query(db, User, company_id)
+                .filter(User.id.in_(skipper_ids))
+                .with_entities(User.id, User.first_name, User.last_name)
+                .all()
+            }
+
     for op in work_order.operations:
         op.cancelled_nest_id = cancelled_nests.get(op.id)
+        op.skipped_by_name = skipper_names.get(op.skipped_by) if op.skipped_by is not None else None
         # Only an ON_HOLD row carries provenance; every other row is explicitly None rather
         # than left unset, so the response shape does not depend on attribute presence.
         #
@@ -6345,11 +6362,13 @@ def add_operation(
     work center; **409** for a complete / closed / cancelled work order; **400** for a laser
     nest work order (add a nest instead).
     """
+    # Row-locked: every routing change on one work order serializes (routing_change_service.lock_work_order).
     work_order = (
         db.query(WorkOrder)
         .filter(
             WorkOrder.id == work_order_id, WorkOrder.company_id == company_id, WorkOrder.is_deleted == False
         )  # noqa: E712
+        .with_for_update()
         .first()
     )
     if not work_order:
@@ -6630,8 +6649,9 @@ def update_operation(
     ``description``, ``setup_instructions``, ``run_instructions``, ``setup_time_hours``,
     ``run_time_hours``, ``run_time_per_piece``, ``requires_inspection`` or ``inspection_type`` on a
     work order that is not a DRAFT needs ``change_reason`` (**422** without it), is written as
-    REQUIRED audit evidence carrying it (**503**, nothing saved, when it cannot be). A work-center
-    move alone needs no reason. Those fields are refused
+    REQUIRED audit evidence carrying it (**503**, nothing saved, when it cannot be), and is refused
+    **403** to any API token (a routing change is a person's judgment). A work-center move alone
+    needs no reason and stays open to a token, as does every edit on a DRAFT. Those fields are refused
     **409** on a COMPLETE operation (they are its record). A SKIPPED operation refuses every edit
     **409** (restore it with unskip first), and ``status: skipped`` is refused **409** (use skip).
     """
@@ -6878,6 +6898,11 @@ def update_operation(
                 "what was done and cannot be edited.",
             )
         if operation.work_order.status != WorkOrderStatus.DRAFT:
+            # A routing change on a released job is a person's judgment (owner decision
+            # 2026-11-25): a standing API token is refused, as on skip / unskip / add / resequence.
+            # A work-center move alone and every DRAFT edit stay open to a token.
+            if is_api_token_credential(current_user):
+                raise HTTPException(status_code=403, detail=API_TOKEN_ROUTING_CHANGE)
             if not change_reason:
                 raise HTTPException(
                     status_code=422,

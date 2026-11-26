@@ -41,7 +41,7 @@ from datetime import datetime
 from typing import Any, Iterable, Optional, Sequence
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 from sqlalchemy.orm import object_session as object_session_or_none
 
 from app.core.credentials import API_TOKEN_ROUTING_CHANGE, is_api_token_credential
@@ -119,11 +119,45 @@ def assert_routing_changeable(work_order: Optional[WorkOrder]) -> WorkOrder:
     return work_order
 
 
+def work_order_lock_query(db: Session, work_order_id: int, company_id: int) -> Query:
+    """``SELECT ... FOR UPDATE`` of one tenant-scoped work order row (the routing-change lock)."""
+    return tenant_query(db, WorkOrder, company_id).filter(WorkOrder.id == work_order_id).with_for_update()
+
+
+def lock_work_order(db: Session, work_order_id: int, company_id: int) -> Optional[WorkOrder]:
+    """Row-lock the work order every routing-change verb serializes on, or ``None``.
+
+    Every verb's guards read the WHOLE route (at least one step stays not skipped, no
+    sequence collision, nothing lands in front of recorded work, no strand), so two
+    concurrent changes judged over two unlocked snapshots could each pass and together
+    break the rule -- two skips skipping every step. All four verbs therefore take this one
+    lock before their first read of the route: skip / unskip through ``load_operation``, add
+    and resequence in their routers. Lock order is the work order row FIRST, then the
+    operation row(s), then the audit chain lock (taken inside ``log_required``, always last).
+    The dispatch-order lock is not taken: no routing verb writes ``dispatch_rank`` or
+    ``run_order``.
+    """
+    return work_order_lock_query(db, work_order_id, company_id).first()
+
+
 def load_operation(db: Session, operation_id: int, company_id: int) -> WorkOrderOperation:
-    """The tenant-scoped operation, or 404 (another company's id is indistinguishable from none)."""
-    operation = (
+    """The tenant-scoped operation, or 404 (another company's id is indistinguishable from none).
+
+    Locks the operation's WORK ORDER row first (``lock_work_order``), then the operation row,
+    so skip / unskip serialize with every other routing change on the same work order.
+    """
+    work_order_id = (
         tenant_query(db, WorkOrderOperation, company_id)
         .filter(WorkOrderOperation.id == operation_id)
+        .with_entities(WorkOrderOperation.work_order_id)
+        .scalar()
+    )
+    if work_order_id is None:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    lock_work_order(db, work_order_id, company_id)
+    operation = (
+        tenant_query(db, WorkOrderOperation, company_id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.work_order_id == work_order_id)
         .with_for_update()
         .first()
     )
@@ -312,6 +346,24 @@ def unskip_operation(
             detail=f"{operation_label(operation)} is {_status_value(operation.status)}, not skipped.",
         )
     route = route_operations(db, work_order)
+    # Add and resequence treat a skipped step's sequence as free (a replacement may take it), so
+    # restoring the original must not put two live steps at one sequence: on a sequenced routing
+    # neither would block the other (both gates compare ``sequence <``), i.e. pooled behavior.
+    taken = next(
+        (
+            op
+            for op in route
+            if op.id != operation.id and op.sequence == operation.sequence and not is_operation_skipped(op)
+        ),
+        None,
+    )
+    if taken is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Sequence {operation.sequence} is now used by {operation_label(taken)} on this work order, so "
+            f"{operation_label(operation)} cannot be restored there. Move {operation_label(taken)} to an unused "
+            "sequence first.",
+        )
     recorded = operation_ids_with_recorded_work(db, route, work_order.company_id)
     restored = operation_what_if(operation, status=OperationStatus.PENDING)
     _refuse_blocking_recorded_work(work_order, [restored], route, recorded, verb="restore this step")
@@ -372,8 +424,9 @@ def add_operation(
     user: User,
     audit: AuditService,
 ) -> RoutingChangeOutcome:
-    """Insert one step. On a non-DRAFT work order: reason required, token 403, required audit,
-    and the same sequence / recorded-work / strand rules as the other verbs."""
+    """Insert one step. The sequence / recorded-work / strand rules apply on every work order,
+    DRAFT included; on a non-DRAFT one a reason is also required, a token is refused 403 and the
+    audit row is REQUIRED. The caller has already row-locked the work order (``lock_work_order``)."""
     if work_order is None or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
     is_draft = work_order.status == WorkOrderStatus.DRAFT
@@ -397,11 +450,13 @@ def add_operation(
         )
 
     operation = WorkOrderOperation(work_order_id=work_order.id, company_id=work_order.company_id, **values)
-    if not is_draft:
-        recorded = operation_ids_with_recorded_work(db, route, work_order.company_id)
-        candidate = operation_what_if(operation, id=-1, status=OperationStatus.PENDING)
-        _refuse_blocking_recorded_work(work_order, [candidate], route, recorded, verb="add a step")
-        _refuse_strand(work_order, route, [*route, candidate])
+    # Judged on a DRAFT too: these protect the production RECORD, not the authorization step,
+    # and a DRAFT can still carry worked steps (a PUT back to draft, or a resume with no
+    # release record, demotes only un-worked ones) whose running labor must stay closable.
+    recorded = operation_ids_with_recorded_work(db, route, work_order.company_id)
+    candidate = operation_what_if(operation, id=-1, status=OperationStatus.PENDING)
+    _refuse_blocking_recorded_work(work_order, [candidate], route, recorded, verb="add a step")
+    _refuse_strand(work_order, route, [*route, candidate])
 
     db.add(operation)
     db.flush()

@@ -1355,6 +1355,32 @@ def _without_skipped(operations: Iterable[Any]) -> list[Any]:
     return [op for op in (operations or []) if op is not None and not is_operation_skipped(op)]
 
 
+def _skipped_line_item_target(work_order: WorkOrder, operations: Iterable[Any]) -> float:
+    """The piece targets of SKIPPED line items -- units of the order nobody will make.
+
+    A line item (no component part, its own target below the order) is a SHARE of the order,
+    not a stage every unit passes through, so skipping one takes its pieces out of what the
+    work order owes (owner decision 2026-11-25: a skipped step produced nothing). A skipped
+    whole-order stage or component step takes nothing out: every unit still flows through the
+    other stages. The callers hand over ACTIVE operations (skipped steps already removed), so
+    the skipped rows are also read off ``work_order.operations``; ``operations`` is searched too,
+    for a caller (or a pure test) that passes them in. Laser pools never reach here.
+    """
+    seen: set[int] = set()
+    total = 0.0
+    candidates = list(operations or []) + list(getattr(work_order, "operations", None) or [])
+    for op in candidates:
+        if op is None or not is_operation_skipped(op) or op.component_part_id:
+            continue
+        key = op.id if op.id is not None else id(op)
+        if key in seen:
+            continue
+        seen.add(key)
+        if operation_chain_key(work_order, op) is None:
+            total += operation_target_quantity(op, work_order)
+    return total
+
+
 # --------------------------------------------------------------------------- #
 # Short-count accounting (owner ruling 1, 2026-11-05).
 #
@@ -1751,9 +1777,20 @@ def finished_quantity_at_all_complete(
     ops = _without_skipped(operations)
     if ordered <= QTY_EPSILON:
         return existing
+    main_ops = [op for op in ops if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY]
+    # A SKIPPED line item's pieces were never made: they come off what the order owes, so the
+    # header (and the FG receipt read from it) never counts them (owner decision 2026-11-25).
+    skipped_lines = 0.0 if main_ops else _skipped_line_item_target(work_order, operations)
+    if skipped_lines > QTY_EPSILON:
+        lines = [op for op in ops if not op.component_part_id]
+        targets = [operation_target_quantity(op, work_order) for op in lines]
+        if abs(sum(targets) + skipped_lines - ordered) <= QTY_EPSILON:
+            owed = max(0.0, ordered - skipped_lines)
+            if not any(_declared_short(op) > QTY_EPSILON for op in ops):
+                return owed
+            return min(owed, sum(min(_qty(op.quantity_complete), target) for op, target in zip(lines, targets)))
     if not any(_declared_short(op) > QTY_EPSILON for op in ops):
         return ordered
-    main_ops = [op for op in ops if operation_chain_key(work_order, op) == MAIN_CHAIN_KEY]
     if main_ops:
         figures = stage_accounting(work_order, ops)
         final_sequence = max(op.sequence or 0 for op in main_ops)
@@ -1920,10 +1957,14 @@ def work_order_completion_bounds(
 
     if is_laser_dispatch_work_order(work_order):
         lines = [op for op in ops if not op.component_part_id and not _loaded_nest_is_deleted(op)]
+        skipped_lines = 0.0
     else:
         lines = [op for op in ops if not op.component_part_id]
+        # A SKIPPED line item's pieces were never made and are not owed (the header twin above).
+        skipped_lines = _skipped_line_item_target(work_order, operations)
     targets = [operation_target_quantity(op, work_order) for op in lines]
-    if lines and abs(sum(targets) - ordered) <= QTY_EPSILON:
+    if lines and abs(sum(targets) + skipped_lines - ordered) <= QTY_EPSILON:
+        owed = max(0.0, ordered - skipped_lines)
         caps = []
         floor_loss = 0.0
         for op, target in zip(lines, targets):
@@ -1935,8 +1976,8 @@ def work_order_completion_bounds(
             caps.append(cap_for(op, acct))
             floor_loss += min(acct.scrapped, max(0.0, target - acct.good))
         return WorkOrderCompletionBounds(
-            deliverable=min(ordered, sum(caps)),
-            physical_max=ordered,
+            deliverable=min(owed, sum(caps)),
+            physical_max=owed,
             floor_loss=floor_loss,
             binding_operation_id=None,
             hard_loss=floor_loss,
@@ -2258,14 +2299,19 @@ class AccountingStrand:
     """Another operation a change would strand (``accounting_change_strands``).
 
     ``reason`` is ``"unaccounted"`` (a COMPLETE operation that adds up today would not --
-    it would become a completed operation that is short) or ``"over_ceiling"`` (its
-    recorded good fits what can reach it today and would not).
+    it would become a completed operation that is short), ``"over_ceiling"`` (its
+    recorded good fits what can reach it today and would not) or -- routing changes only
+    (``routing_change_strands``) -- ``"ahead_of_declared_short"``: an unfinished step would
+    sit in front of ``declaring``, a COMPLETE step of its own credited chain that already
+    declared a short. That declaration was credited to the steps AFTER it; a step in front
+    would be credited nothing and asked to account for units that no longer exist.
     """
 
-    operation: WorkOrderOperation
-    reason: Literal["unaccounted", "over_ceiling"]
+    operation: Any
+    reason: Literal["unaccounted", "over_ceiling", "ahead_of_declared_short"]
     before: OperationAccounting
     after: OperationAccounting
+    declaring: Optional[WorkOrderOperation] = None
 
 
 def _accounting_from_figures(
@@ -2360,7 +2406,50 @@ def routing_change_strands(
             return AccountingStrand(op, "unaccounted", acct_before, acct_after)
         if acct_before.good <= acct_before.ceiling + QTY_EPSILON and acct_after.good > acct_after.ceiling + QTY_EPSILON:
             return AccountingStrand(op, "over_ceiling", acct_before, acct_after)
+    # Credit flows BY SEQUENCE, so moving, adding or restoring an unfinished step in front of a
+    # completed stage of its own chain that declared a short re-interprets that declaration --
+    # the step would be credited nothing for units already declared lost upstream of where it
+    # now sits (and on a pooled work order the recorded-work gate waives a same-work-center
+    # predecessor, so nothing else refuses it). Only a NEW such position counts.
+    already = _ahead_of_declared_short(work_order, ops)
+    for op_id, (step, declaring) in sorted(
+        _ahead_of_declared_short(work_order, proposed).items(),
+        key=lambda item: ((item[1][0].sequence or 0), item[0]),
+    ):
+        if op_id in already:
+            continue
+        acct_before = _accounting_from_figures(work_order, step, before_figures)
+        acct_after = _accounting_from_figures(work_order, step, after_figures)
+        return AccountingStrand(step, "ahead_of_declared_short", acct_before, acct_after, declaring=declaring)
     return None
+
+
+def _ahead_of_declared_short(work_order: WorkOrder, operations: Sequence[Any]) -> dict[int, tuple[Any, Any]]:
+    """``{id: (step, declaring)}``: unfinished, non-skipped steps of a CREDITED chain that sit at or
+    before (by sequence) a COMPLETE step of the same chain carrying a declared short."""
+    live = [op for op in _without_skipped(operations) if getattr(op, "id", None) is not None]
+    result: dict[int, tuple[Any, Any]] = {}
+    for step in live:
+        if is_operation_finished(step.status):
+            continue
+        key = operation_chain_key(work_order, step)
+        if key is None or not chain_credit_enabled(work_order, key):
+            continue
+        declaring = next(
+            (
+                other
+                for other in sorted(live, key=lambda item: ((item.sequence or 0), item.id or 0))
+                if other.id != step.id
+                and other.status == OperationStatus.COMPLETE
+                and _declared_short(other) > QTY_EPSILON
+                and (other.sequence or 0) >= (step.sequence or 0)
+                and operation_chain_key(work_order, other) == key
+            ),
+            None,
+        )
+        if declaring is not None:
+            result[step.id] = (step, declaring)
+    return result
 
 
 def operation_what_if(operation: Any, **overrides: Any) -> Any:

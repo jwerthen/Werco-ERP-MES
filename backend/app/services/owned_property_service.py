@@ -273,6 +273,7 @@ def _open_ties(db: Session, company_id: int, part_id: int) -> list:
     # imports this module.
     from app.models.work_order import WorkOrder
     from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+    from app.services.material_tie_demand import tie_is_live_demand_clause
     from app.services.work_order_state_service import TERMINAL_WO_STATUSES
 
     rows = (
@@ -285,6 +286,8 @@ def _open_ties(db: Session, company_id: int, part_id: int) -> list:
             WorkOrder.company_id == company_id,
             WorkOrder.is_deleted == False,  # noqa: E712 -- what can still draw: a selection read
             WorkOrder.status.notin_(TERMINAL_WO_STATUSES),
+            # A SKIPPED step's ties draw nothing while it stays skipped (material_tie_demand).
+            tie_is_live_demand_clause(),
         )
         .order_by(WorkOrderMaterialAllocation.id.asc())
         .all()

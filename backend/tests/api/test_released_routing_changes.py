@@ -583,11 +583,45 @@ class TestEditContentOnAReleasedJob:
         resp = self._put(client, db_session, op10, user_headers(supervisor), name="Renamed", change_reason="x")
         assert resp.status_code == 409
 
-    def test_a_token_edit_still_needs_the_reason(self, client, db_session, admin_headers, supervisor, three_step):
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"name": "Renamed"},
+            {"name": "Renamed", "change_reason": "ECO 7"},
+            {"requires_inspection": False, "change_reason": "ECO 7"},
+            {"run_instructions": "skip the torque check", "change_reason": "ECO 7"},
+            {"run_time_hours": 0.1, "change_reason": "ECO 7"},
+        ],
+    )
+    def test_a_token_cannot_edit_a_released_steps_content(
+        self, client, db_session, admin_headers, supervisor, three_step, fields
+    ):
+        """Owner decision 2026-11-25: a routing change on a released job is a person's judgment,
+        so a standing token is refused 403 -- reason or not -- and the step is left untouched
+        (in particular its inspection requirement cannot be dropped by an agent)."""
         _, (_, op20, _) = three_step
+        set_op(db_session, op20, requires_inspection=True, run_instructions="torque to spec", run_time_hours=1.0)
         token = _token(client, admin_headers, supervisor)
-        assert self._put(client, db_session, op20, token, name="Renamed").status_code == 422
-        assert self._put(client, db_session, op20, token, name="Renamed", change_reason="ECO 7").status_code == 200
+        resp = self._put(client, db_session, op20, token, **fields)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == API_TOKEN_ROUTING_CHANGE
+        row = fresh(db_session, WorkOrderOperation, op20.id)
+        assert (row.name, row.requires_inspection, row.run_instructions, float(row.run_time_hours)) == (
+            "Step 20",
+            True,
+            "torque to spec",
+            1.0,
+        )
+
+    def test_a_token_may_still_move_a_step_or_edit_a_draft(self, client, db_session, admin_headers, supervisor):
+        token = _token(client, admin_headers, supervisor)
+        _, (released_op, _) = make_routing(db_session, work_centers=[make_work_center(db_session) for _ in range(2)])
+        moved = self._put(client, db_session, released_op, token, work_center_id=make_work_center(db_session).id)
+        assert moved.status_code == 200, moved.text
+        _, (draft_op,) = make_routing(
+            db_session, work_centers=[make_work_center(db_session)], statuses=[PENDING], wo_status=WorkOrderStatus.DRAFT
+        )
+        assert self._put(client, db_session, draft_op, token, name="Renamed").status_code == 200
 
 
 # --------------------------------------------------------------------------- accounting / completion
@@ -622,6 +656,37 @@ class TestASkippedStepProducesNothing:
         acct = operation_accounting(wo, op30)
         assert acct.ceiling == pytest.approx(8)
         assert op20.id not in stage_accounting(wo, list(wo.operations))
+
+    def test_a_skipped_parallel_twin_does_not_hold_back_a_completed_stage(self, db_session):
+        """DECISIVE for the skipped-step transparency of the main-chain walk: a skipped step
+        treated as an unfinished stage member, or as COMPLETE at 0 good, changes op30's answer.
+
+        Sequenced, ordered 10. Component op 15 (part P, 10 pieces) closed 2 short, so 2 assemblies
+        cannot get a P. Stage 20 is two parallel steps: 20a COMPLETE at 10 good (P was
+        replenished), 20b SKIPPED. Stage 20 is therefore fully complete, it passed on the 10 it
+        made, and the component loss before it is absorbed: op30 receives all 10. Were 20b in the
+        walk as a not-complete member, stage 20 would not absorb and op30 would receive 8; were it
+        COMPLETE at 0 good, ``min(good)`` would pass on 8 -- either way 8, not 10.
+        """
+        from tests.api.short_count_helpers import make_part
+
+        wcs = [make_work_center(db_session) for _ in range(4)]
+        component = make_part(db_session)
+        wo, (op15, op20a, op20b, op30) = make_routing(
+            db_session,
+            work_centers=wcs,
+            statuses=[COMPLETE, COMPLETE, SKIPPED, PENDING],
+            component_parts=[component, None, None, None],
+            component_quantities=[10, None, None, None],
+        )
+        set_op(db_session, op15, sequence=15, quantity_complete=8, quantity_scrapped=2, quantity_short_declared=2)
+        set_op(db_session, op20a, sequence=20, quantity_complete=10)
+        set_op(db_session, op20b, sequence=20)
+        set_op(db_session, op30, sequence=30)
+        db_session.refresh(wo)
+        acct = operation_accounting(wo, op30)
+        assert acct.ceiling == pytest.approx(10)
+        assert acct.received == pytest.approx(10)
 
     def test_finished_quantity_ignores_a_skipped_final_stage(self, db_session):
         wcs = [make_work_center(db_session) for _ in range(2)]
@@ -658,16 +723,6 @@ class TestASkippedStepProducesNothing:
         )
         assert resp.status_code == 200, resp.text
         assert _statuses(db_session, [op10, op20, op30]) == [COMPLETE, SKIPPED, COMPLETE]
-
-    def test_a_skipped_step_consumes_no_material(self, client, db_session, supervisor, three_step):
-        from tests.api.short_count_helpers import ledger_rows, tie_material
-
-        wo, (_, op20, _) = three_step
-        tie_material(db_session, wo, op20)
-        before = len(ledger_rows(db_session, COMPANY_A))
-        assert _skip(client, db_session, op20, user_headers(supervisor)).status_code == 200
-        client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor))
-        assert len(ledger_rows(db_session, COMPANY_A)) == before
 
 
 def test_audit_log_rows_are_tenant_tagged(client, db_session, supervisor, three_step):
@@ -708,3 +763,408 @@ def test_the_predecessor_twins_agree_over_every_status(
     assert sql == memory
     if predecessor_status in FINISHED_OPERATION_STATUSES:
         assert sql is False
+
+
+# --------------------------------------------------------------------------- review fixes (2026-11-25)
+
+
+class TestASkippedComponentStepIssuesNoBackflush:
+    """A skipped step consumes no material. The routing leg of the backflush reads
+    ``component_part_id`` off the operations, so a SKIPPED operation must state no demand (the
+    step never ran). (A tie on a skipped step cannot consume through the per-run engine at all:
+    skip refuses a step with any good, scrap or start, so ``qty_per_run x (good + scrap)`` is 0
+    by construction -- the end-to-end test below still asserts it.)"""
+
+    def _armed(self, db_session, *, replica: bool = False):
+        from app.models.inventory import InventoryItem
+        from tests.api.short_count_helpers import make_part
+
+        bracket = make_part(db_session, part_type="purchased")
+        db_session.add(
+            InventoryItem(
+                part_id=bracket.id,
+                location="RAW-A",
+                warehouse="MAIN",
+                quantity_on_hand=100.0,
+                quantity_allocated=0.0,
+                quantity_available=100.0,
+                lot_number=f"BRK-{bracket.id}",
+                unit_cost=1.0,
+                status="available",
+                is_active=True,
+                company_id=COMPANY_A,
+            )
+        )
+        db_session.commit()
+        count = 3 if replica else 2
+        wo, ops = make_routing(
+            db_session,
+            work_centers=[make_work_center(db_session) for _ in range(count)],
+            statuses=[COMPLETE] + [READY] * (count - 1),
+            component_parts=[None] + [bracket] * (count - 1),
+            component_quantities=[None] + [10] * (count - 1),
+        )
+        set_op(db_session, ops[0], quantity_complete=10)
+        set_op(db_session, wo, status=WorkOrderStatus.IN_PROGRESS)
+        set_op(db_session, wo.part, backflush_components=True)
+        return wo, ops, bracket
+
+    def test_the_resolver_drops_a_component_only_a_skipped_step_names(self, db_session):
+        from app.services.completion_inventory_service import _resolve_backflush_demand
+
+        wo, (_, op20), bracket = self._armed(db_session)
+        set_op(db_session, wo, quantity_complete=10)
+        assert bracket.id in _resolve_backflush_demand(db_session, wo, COMPANY_A).demand
+        set_op(db_session, op20, status=SKIPPED)
+        resolution = _resolve_backflush_demand(db_session, wo, COMPANY_A)
+        assert bracket.id not in resolution.demand
+        assert not [d for d in resolution.diagnostics if d.code == "incomplete_operation_demand"]
+
+    def test_a_skipped_replica_leaves_the_live_steps_demand_alone(self, db_session):
+        from app.services.completion_inventory_service import _resolve_backflush_demand
+
+        wo, (_, op20, op30), bracket = self._armed(db_session, replica=True)
+        set_op(db_session, wo, quantity_complete=10)
+        set_op(db_session, op20, status=SKIPPED)
+        set_op(db_session, op30, status=COMPLETE, quantity_complete=10)
+        assert _resolve_backflush_demand(db_session, wo, COMPANY_A).demand.get(bracket.id) == pytest.approx(10)
+
+    @staticmethod
+    def _issued(db_session, part):
+        from app.models.inventory import InventoryTransaction
+
+        db_session.expire_all()
+        return (
+            db_session.query(InventoryTransaction)
+            .filter(InventoryTransaction.company_id == COMPANY_A, InventoryTransaction.part_id == part.id)
+            .all()
+        )
+
+    def test_skipping_the_last_component_step_completes_the_job_without_issuing_it(
+        self, client, db_session, supervisor
+    ):
+        from tests.api.short_count_helpers import tie_material
+
+        wo, (_, op20), bracket = self._armed(db_session)
+        sheet = tie_material(db_session, wo, op20)
+        resp = _skip(client, db_session, op20, user_headers(supervisor))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["work_order_status"] == "complete"
+        assert self._issued(db_session, bracket) == []
+        assert self._issued(db_session, sheet) == []
+
+    def test_control_the_same_job_completing_the_step_does_issue_it(self, client, db_session, supervisor):
+        """Proves the setup above reaches the backflush: completing (not skipping) the step issues."""
+        wo, (_, op20), bracket = self._armed(db_session)
+        set_op(db_session, op20, status=COMPLETE, quantity_complete=10)
+        assert client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).status_code == 200
+        assert fresh(db_session, WorkOrder, wo.id).status == WorkOrderStatus.COMPLETE
+        assert sum(abs(float(row.quantity)) for row in self._issued(db_session, bracket)) == pytest.approx(10)
+
+
+class TestASkippedStepsTiesAreNotDemand:
+    def test_readiness_and_reservations_drop_the_tie_while_skipped_and_restore_it(
+        self, client, db_session, supervisor, three_step
+    ):
+        from datetime import date
+
+        from app.services.material_readiness_service import material_readiness
+        from app.services.owned_property_service import _open_ties
+        from tests.api.short_count_helpers import tie_material
+
+        wo, (_, op20, _) = three_step
+        sheet = tie_material(db_session, wo, op20)
+        headers = user_headers(supervisor)
+
+        def readiness_parts():
+            db_session.expire_all()
+            job = material_readiness(db_session, COMPANY_A, [fresh(db_session, WorkOrder, wo.id)], date.today())
+            return {line["part_id"] for line in job["jobs"][wo.id]["lines"]}
+
+        def reserved():
+            db_session.expire_all()
+            return [
+                allocation.work_order_operation_id for allocation, _, _ in _open_ties(db_session, COMPANY_A, sheet.id)
+            ]
+
+        assert sheet.id in readiness_parts() and reserved() == [op20.id]
+        assert _skip(client, db_session, op20, headers).status_code == 200
+        assert sheet.id not in readiness_parts()
+        assert reserved() == []
+        # The tie itself is untouched (no irreversible status change) ...
+        from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
+
+        tie = (
+            db_session.query(WorkOrderMaterialAllocation)
+            .filter(WorkOrderMaterialAllocation.work_order_operation_id == op20.id)
+            .one()
+        )
+        assert tie.status == AllocationStatus.OPEN and float(tie.qty_planned) == pytest.approx(10)
+        # ... so restoring the step makes it demand again.
+        assert _unskip(client, db_session, op20, headers).status_code == 200
+        assert sheet.id in readiness_parts() and reserved() == [op20.id]
+
+
+class TestASkippedLineItemIsNotOwed:
+    """A pool / batch work order whose line items split the order: a skipped line's pieces were
+    never made, so the header (and the FG receipt read from it) must not count them."""
+
+    def _lines(self, db_session, statuses):
+        return make_routing(
+            db_session,
+            work_centers=[make_work_center(db_session) for _ in range(2)],
+            sequential=False,
+            statuses=statuses,
+            component_quantities=[6, 4],
+        )
+
+    def test_the_header_is_what_the_live_lines_made(self, db_session):
+        wo, (line_a, line_b) = self._lines(db_session, [COMPLETE, SKIPPED])
+        set_op(db_session, line_a, quantity_complete=6)
+        db_session.refresh(wo)
+        assert finished_quantity_at_all_complete(wo, active_work_order_operations(wo), 0.0) == pytest.approx(6)
+        set_op(db_session, line_a, quantity_complete=5, quantity_scrapped=1, quantity_short_declared=1)
+        db_session.refresh(wo)
+        assert finished_quantity_at_all_complete(wo, active_work_order_operations(wo), 0.0) == pytest.approx(5)
+
+    def test_force_complete_bounds_do_not_count_the_skipped_line(self, db_session):
+        from app.services.work_order_state_service import work_order_completion_bounds
+
+        wo, (line_a, _) = self._lines(db_session, [COMPLETE, SKIPPED])
+        set_op(db_session, line_a, quantity_complete=6)
+        db_session.refresh(wo)
+        bounds = work_order_completion_bounds(wo, active_work_order_operations(wo), {line_a.id: 6.0}, {line_a.id: True})
+        assert bounds.deliverable == pytest.approx(6)
+        assert bounds.physical_max == pytest.approx(6)
+
+    def test_skipping_the_open_line_completes_the_job_at_the_made_quantity(self, client, db_session, supervisor):
+        wo, (line_a, line_b) = self._lines(db_session, [COMPLETE, READY])
+        set_op(db_session, line_a, quantity_complete=6)
+        set_op(db_session, wo, status=WorkOrderStatus.IN_PROGRESS)
+        resp = _skip(client, db_session, line_b, user_headers(supervisor))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["work_order_status"] == "complete"
+        assert float(fresh(db_session, WorkOrder, wo.id).quantity_complete) == pytest.approx(6)
+
+
+class TestRestoreNeverDuplicatesASequence:
+    def test_restore_onto_a_replacements_sequence_is_refused(self, client, db_session, supervisor, three_step):
+        wo, (_, op20, _) = three_step
+        headers = user_headers(supervisor)
+        assert _skip(client, db_session, op20, headers).status_code == 200
+        added = client.post(
+            add_url(wo), headers=headers, json=_add_body(make_work_center(db_session), 20, change_reason="replace")
+        )
+        assert added.status_code == 200, added.text
+        resp = _unskip(client, db_session, op20, headers)
+        assert resp.status_code == 409, resp.text
+        assert "Sequence 20 is now used by" in resp.json()["detail"]
+        assert _statuses(db_session, [op20]) == [SKIPPED]
+
+
+class TestAChangeMayNotReinterpretADeclaredShort:
+    """Pooled work order, one machine, a component chain for part P: op10 COMPLETE at 8 good and
+    2 declared short, op20 PENDING credited the 2 (component chains are always credited). Moving
+    op20 -- or adding a P step -- in front of op10 would credit it nothing for units that no
+    longer exist; the same-work-center waiver on a pooled job means no other gate refuses it."""
+
+    def _chain(self, db_session):
+        from tests.api.short_count_helpers import make_part
+
+        wc = make_work_center(db_session)
+        component = make_part(db_session)
+        wo, (op10, op20) = make_routing(
+            db_session,
+            work_centers=[wc, wc],
+            sequential=False,
+            statuses=[COMPLETE, PENDING],
+            component_parts=[component, component],
+            component_quantities=[10, 10],
+        )
+        set_op(db_session, op10, sequence=20, quantity_complete=8, quantity_scrapped=2, quantity_short_declared=2)
+        set_op(db_session, op20, sequence=30)
+        db_session.refresh(wo)
+        assert operation_accounting(wo, op20).received == pytest.approx(8)
+        return wo, (op10, op20), wc, component
+
+    def test_moving_a_step_in_front_of_the_declaring_stage_is_refused(self, client, db_session, supervisor):
+        wo, (op10, op20), _, _ = self._chain(db_session)
+        body = {"reason": "x", "operations": [{"id": op20.id, "version": _version(db_session, op20), "sequence": 10}]}
+        resp = client.post(reseq_url(wo), headers=user_headers(supervisor), json=body)
+        assert resp.status_code == 409, resp.text
+        assert "already closed short of 2" in resp.json()["detail"]
+        assert fresh(db_session, WorkOrderOperation, op20.id).sequence == 30
+
+    def test_moving_it_further_back_is_allowed(self, client, db_session, supervisor):
+        wo, (_, op20), _, _ = self._chain(db_session)
+        body = {"reason": "x", "operations": [{"id": op20.id, "version": _version(db_session, op20), "sequence": 40}]}
+        assert client.post(reseq_url(wo), headers=user_headers(supervisor), json=body).status_code == 200
+
+    def test_adding_a_chain_step_in_front_of_it_is_refused(self, client, db_session, supervisor):
+        wo, _, wc, component = self._chain(db_session)
+        resp = client.post(
+            add_url(wo),
+            headers=user_headers(supervisor),
+            json=_add_body(wc, 10, component_part_id=component.id, component_quantity=10, change_reason="x"),
+        )
+        assert resp.status_code == 409, resp.text
+        assert "already closed short" in resp.json()["detail"]
+        assert len(fresh(db_session, WorkOrder, wo.id).operations) == 2
+
+
+class TestAddingToADraftStillProtectsRecordedWork:
+    def test_inserting_before_running_labor_on_a_draft_is_refused(self, client, db_session, supervisor):
+        """A DRAFT can carry a worked step (PUT back to draft / resume with no release record
+        demote only un-worked ones). A new step in front of it would make its running labor
+        uncompletable, so the recorded-work guard applies on a DRAFT too (no reason needed)."""
+        wcs = [make_work_center(db_session) for _ in range(2)]
+        wo, (op20, op30) = make_routing(
+            db_session, work_centers=wcs, statuses=[IN_PROGRESS, PENDING], wo_status=WorkOrderStatus.DRAFT
+        )
+        set_op(db_session, op20, sequence=20)
+        set_op(db_session, op30, sequence=30)
+        add_entry(db_session, make_user(db_session), op20, open_entry=True)
+        resp = client.post(
+            add_url(wo), headers=user_headers(supervisor), json=_add_body(make_work_center(db_session), 10)
+        )
+        assert resp.status_code == 409, resp.text
+        assert "recorded work" in resp.json()["detail"]
+        assert len(fresh(db_session, WorkOrder, wo.id).operations) == 2
+        # After the worked step a draft add still needs no reason.
+        ok = client.post(
+            add_url(wo), headers=user_headers(supervisor), json=_add_body(make_work_center(db_session), 40)
+        )
+        assert ok.status_code == 200, ok.text
+
+
+class TestEveryRoutingVerbLocksTheWorkOrderFirst:
+    """SQLite cannot show two transactions racing on a row lock, so this pins the mechanism:
+    each verb issues a ``SELECT ... FOR UPDATE`` of the work order row before it reads the
+    route, and that statement really compiles to FOR UPDATE on Postgres."""
+
+    def test_the_lock_query_compiles_to_for_update_on_postgres(self, db_session):
+        from sqlalchemy.dialects import postgresql
+
+        from app.services.routing_change_service import work_order_lock_query
+
+        sql = str(work_order_lock_query(db_session, 1, COMPANY_A).statement.compile(dialect=postgresql.dialect()))
+        assert "FROM work_orders" in sql and sql.rstrip().endswith("FOR UPDATE")
+        assert "work_orders.company_id" in sql
+
+    @pytest.fixture
+    def statements(self):
+        from sqlalchemy import event
+        from sqlalchemy.orm import Session as OrmSession
+
+        seen: list[tuple[str, bool]] = []
+
+        def record(state):
+            if not state.is_select:
+                return
+            descriptions = getattr(state.statement, "column_descriptions", None) or []
+            # Whole-row reads only (``load_operation``'s ``work_order_id`` peek that finds which
+            # work order to lock is a single-column read, not a read of the route).
+            name = descriptions[0].get("name") if descriptions else None
+            if name in ("WorkOrder", "WorkOrderOperation"):
+                seen.append((name, state.statement._for_update_arg is not None))
+
+        event.listen(OrmSession, "do_orm_execute", record)
+        yield seen
+        event.remove(OrmSession, "do_orm_execute", record)
+
+    @staticmethod
+    def _locked_before_route_read(seen) -> bool:
+        lock = next((i for i, (name, locked) in enumerate(seen) if name == "WorkOrder" and locked), None)
+        route = next((i for i, (name, locked) in enumerate(seen) if name == "WorkOrderOperation" and not locked), None)
+        return lock is not None and (route is None or lock < route)
+
+    def test_skip_and_unskip(self, client, db_session, supervisor, three_step, statements):
+        _, (_, _, op30) = three_step
+        headers = user_headers(supervisor)
+        version = _version(db_session, op30)
+        statements.clear()
+        assert client.post(skip_url(op30), headers=headers, json={"version": version, "reason": "x"}).status_code == 200
+        assert self._locked_before_route_read(statements), statements
+        version = _version(db_session, op30)
+        statements.clear()
+        assert (
+            client.post(unskip_url(op30), headers=headers, json={"version": version, "reason": "x"}).status_code == 200
+        )
+        assert self._locked_before_route_read(statements), statements
+
+    def test_add_and_resequence(self, client, db_session, supervisor, three_step, statements):
+        wo, (_, op20, op30) = three_step
+        headers = user_headers(supervisor)
+        statements.clear()
+        body = _add_body(make_work_center(db_session), 40, change_reason="x")
+        assert client.post(add_url(wo), headers=headers, json=body).status_code == 200
+        assert self._locked_before_route_read(statements), statements
+        moves = [
+            {"id": op.id, "version": _version(db_session, op), "sequence": seq} for op, seq in ((op20, 30), (op30, 20))
+        ]
+        statements.clear()
+        assert client.post(reseq_url(wo), headers=headers, json={"reason": "x", "operations": moves}).status_code == 200
+        assert self._locked_before_route_read(statements), statements
+
+
+class TestSkippedByName:
+    """The work-order read names who skipped a step (``skipped_by_name``), from one batched,
+    tenant-scoped user read -- non-admin viewers cannot resolve a bare user id."""
+
+    def test_the_read_names_each_skipper_in_one_user_query(self, client, db_session, supervisor):
+        from sqlalchemy import event
+        from sqlalchemy.orm import Session as OrmSession
+
+        from app.models.user import UserRole
+        from app.services.wallboard_service import operator_display_name
+
+        other = make_user(db_session, role=UserRole.MANAGER)
+        wo, (op10, op20, op30) = make_routing(
+            db_session,
+            work_centers=[make_work_center(db_session) for _ in range(3)],
+            statuses=[READY, PENDING, PENDING],
+        )
+        assert _skip(client, db_session, op20, user_headers(supervisor)).status_code == 200
+        assert _skip(client, db_session, op30, user_headers(other)).status_code == 200
+
+        user_reads: list[int] = []
+
+        def record(state):
+            # The name lookup's own shape (id + first + last name); the viewer's auth reads load
+            # whole user rows and are not counted.
+            sql = " ".join(str(state.statement).split())
+            if state.is_select and sql.startswith(
+                "SELECT users.id AS users_id, users.first_name AS users_first_name, users.last_name"
+            ):
+                user_reads.append(sql[:120])
+
+        event.listen(OrmSession, "do_orm_execute", record)
+        try:
+            body = client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).json()
+            with_skips = len(user_reads)
+            user_reads.clear()
+            set_op(db_session, op20, status=PENDING, skipped_by=None, skipped_at=None, skip_reason=None)
+            set_op(db_session, op30, status=PENDING, skipped_by=None, skipped_at=None, skip_reason=None)
+            assert client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).status_code == 200
+            without_skips = len(user_reads)
+        finally:
+            event.remove(OrmSession, "do_orm_execute", record)
+        names = {op["id"]: op["skipped_by_name"] for op in body["operations"]}
+        assert names == {
+            op10.id: None,
+            op20.id: operator_display_name(supervisor.first_name, supervisor.last_name),
+            op30.id: operator_display_name(other.first_name, other.last_name),
+        }
+        assert names[op20.id]
+        # Two skippers, ONE user read; none when nothing is skipped.
+        assert (with_skips, without_skips) == (1, 0)
+
+    def test_a_skipper_outside_the_active_company_is_not_resolved(self, client, db_session, supervisor):
+        from app.models.user import UserRole
+
+        outsider = make_user(db_session, company_id=COMPANY_B, role=UserRole.ADMIN)
+        wo, (_, op20) = make_routing(db_session, work_centers=[make_work_center(db_session) for _ in range(2)])
+        set_op(db_session, op20, status=SKIPPED, skipped_by=outsider.id, skip_reason="legacy")
+        body = client.get(f"/api/v1/work-orders/{wo.id}", headers=user_headers(supervisor)).json()
+        row = next(op for op in body["operations"] if op["id"] == op20.id)
+        assert row["skipped_by"] == outsider.id and row["skipped_by_name"] is None

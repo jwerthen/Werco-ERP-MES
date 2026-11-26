@@ -701,14 +701,15 @@ class TestOperationPut:
                 "version": op.version,
                 "quantity_scrapped": 1,
                 "scrap_reason": "crack",
-                "name": "Renamed",
-                "change_reason": "routing test edit",
             },
             headers=_token(client, admin_headers, supervisor),
         )
+        # No accompanying edit: renaming a released step is a routing change a token is refused
+        # (API_TOKEN_ROUTING_CHANGE, owner decision 2026-11-25), and a work-center move is refused
+        # while labor runs. The resend alone must be accepted, not read as a declaration.
         assert resp.status_code == 200, resp.text
         row = fresh(db_session, WorkOrderOperation, op.id)
-        assert (row.name, float(row.quantity_scrapped)) == ("Renamed", 1)
+        assert (row.name, float(row.quantity_scrapped), row.scrap_reason) == ("Step 10", 1, "crack")
 
     def test_a_person_at_the_desk_may_raise_scrap(self, client, db_session, supervisor):
         wc = make_work_center(db_session)
@@ -1080,8 +1081,6 @@ class TestSubEpsilonScrapFromAToken:
                 "version": op.version,
                 "quantity_scrapped": noisy,
                 "scrap_reason": PERSONS_REASON,
-                "name": "Renamed",
-                "change_reason": "routing test edit",
             },
             headers=headers,
         )
@@ -1097,7 +1096,7 @@ class TestSubEpsilonScrapFromAToken:
             headers=headers,
         )
         assert wo_resp.status_code == 200, wo_resp.text
-        assert fresh(db_session, WorkOrderOperation, op.id).name == "Renamed"
+        assert float(fresh(db_session, WorkOrderOperation, op.id).quantity_scrapped) == pytest.approx(noisy)
         assert fresh(db_session, WorkOrder, wo.id).notes == "n"
 
 
@@ -1117,7 +1116,17 @@ def _door_floor_op(db: Session, user: User, full: bool) -> dict:
 def _door_closable(db: Session, user: User, full: bool) -> dict:
     """8 (or, ``full``, 10) of 10 good on a closed labor entry."""
     _, wo, op = _short_op(db, user, good=10 if full else 8)
-    return {"op": op.id, "wo": wo.id, "version": op.version, "wo_version": wo.version}
+    # A step nobody is working, for the one non-count edit a token may make on a released job.
+    _, (idle,) = make_routing(db, work_centers=[make_work_center(db)], statuses=[OperationStatus.READY])
+    return {
+        "op": op.id,
+        "wo": wo.id,
+        "version": op.version,
+        "wo_version": wo.version,
+        "idle_op": idle.id,
+        "idle_version": idle.version,
+        "other_wc": make_work_center(db).id,
+    }
 
 
 def _good(db: Session, op_id: int) -> float:
@@ -1167,13 +1176,10 @@ DOOR_CASES = {
         UserRole.SUPERVISOR,
         _door_closable,
         lambda c: {"operation_id": c["op"], "version": c["version"], "quantity_scrapped": 1, "scrap_reason": "x"},
-        lambda c: {
-            "operation_id": c["op"],
-            "version": c["version"],
-            "name": "Renamed",
-            "change_reason": "routing test edit",
-        },
-        lambda db, c: fresh(db, WorkOrderOperation, c["op"]).name == "Renamed",
+        # A work-center move: the one non-count edit a token may make on a released step (a
+        # rename is a routing change, refused to a token -- owner decision 2026-11-25).
+        lambda c: {"operation_id": c["idle_op"], "version": c["idle_version"], "work_center_id": c["other_wc"]},
+        lambda db, c: fresh(db, WorkOrderOperation, c["idle_op"]).work_center_id == c["other_wc"],
     ),
     "update_work_order": (
         UserRole.SUPERVISOR,

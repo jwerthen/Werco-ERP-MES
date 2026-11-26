@@ -780,6 +780,10 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     # null otherwise. ``status`` is then ``skipped``.
     skipped_at: Optional[datetime] = None
     skipped_by: Optional[int] = None
+    # Display form of ``skipped_by`` ("Dana R."), resolved on the work-order read
+    # (``work_orders._enrich_work_order_operations``); null when not skipped or not resolvable
+    # in the active company.
+    skipped_by_name: Optional[str] = None
     skip_reason: Optional[str] = None
     laser_nest: Optional[LaserNestOperationInfo] = None
     cancelled_nest_id: Optional[int] = None

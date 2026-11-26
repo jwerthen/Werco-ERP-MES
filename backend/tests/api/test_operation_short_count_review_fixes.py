@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.core.credentials import API_TOKEN_ROUTING_CHANGE
 from app.models.inventory import InventoryTransaction, TransactionType
 from app.models.time_entry import TimeEntry
 from app.models.user import UserRole
@@ -320,12 +321,24 @@ class TestOperationPutOnAnOpenOperation:
         )
         assert good_edit.status_code == 403, good_edit.text
         assert good_edit.json()["detail"] == API_TOKEN_COUNT_JUDGMENT
+        # Owner decision 2026-11-25: editing a released step's content is a routing change, a
+        # person's judgment -- refused to a token even with a reason ...
         renamed = client.put(
             OPERATION_PUT_URL.format(op=op.id),
             json={"version": op.version, "name": "Renamed", "change_reason": "routing test edit"},
             headers=token,
         )
-        assert renamed.status_code == 200, "a non-count edit stays open to a token"
+        assert renamed.status_code == 403, renamed.text
+        assert renamed.json()["detail"] == API_TOKEN_ROUTING_CHANGE
+        # ... while a non-count edit that is not a routing change (a work-center move of a step
+        # nobody is working) stays open.
+        _, (idle,) = make_routing(db_session, work_centers=[make_work_center(db_session)], statuses=[READY])
+        moved = client.put(
+            OPERATION_PUT_URL.format(op=idle.id),
+            json={"version": idle.version, "work_center_id": make_work_center(db_session).id},
+            headers=token,
+        )
+        assert moved.status_code == 200, moved.text
 
 
 class TestReCloseUpstreamCannotStrandALaterStage:

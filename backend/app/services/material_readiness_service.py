@@ -21,6 +21,7 @@ from app.models.work_order import WorkOrderOperation
 from app.models.work_order_material import AllocationStatus, WorkOrderMaterialAllocation
 from app.services.completion_inventory_service import _resolve_backflush_demand
 from app.services.material_consumption_service import AUTO_DRAW_ITEM_CLAUSES, CONSUMABLE_ITEM_CLAUSES
+from app.services.material_tie_demand import live_demand_ties
 
 
 def _day(value):
@@ -87,7 +88,8 @@ def material_readiness(db, company_id: int, orders: list, today: date) -> dict:
         planned.operations = [op for op in operations if op.work_order_id == wo.id]
         planned.quantity_complete = max(_number(wo.quantity_ordered), _number(wo.quantity_complete))
         planned.quantity_scrapped = _number(wo.quantity_scrapped)
-        ties = [row for row in allocations if row.work_order_id == wo.id]
+        # A SKIPPED step's ties are not demand while it stays skipped (restore makes them so again).
+        ties = live_demand_ties([row for row in allocations if row.work_order_id == wo.id], planned.operations)
         resolution = _resolve_backflush_demand(db, planned, company_id, ties)
         diagnostics[wo.id] = [asdict(row) for row in resolution.diagnostics if row.severity == "blocking"]
         demand = dict(resolution.demand)

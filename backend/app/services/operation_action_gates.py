@@ -422,6 +422,15 @@ def good_above_ceiling_message(operation: WorkOrderOperation, acct: OperationAcc
 def accounting_strand_message(strand: AccountingStrand) -> str:
     """409: the change would strand another operation's accounting (``accounting_change_strands``)."""
     label = operation_label(strand.operation)
+    if strand.reason == "ahead_of_declared_short":
+        declaring = strand.declaring
+        declaring_label = operation_label(declaring) if declaring is not None else "a completed step"
+        return (
+            f"{label} would come before {declaring_label}, which already closed short of "
+            f"{_qty_text(getattr(declaring, 'quantity_short_declared', 0) or 0)}; the steps after it were credited "
+            f"for that loss, and a step in front of it would have to account for units that no longer exist. "
+            f"Use a sequence after {declaring_label}."
+        )
     if strand.reason == "unaccounted":
         return f"{label} is already complete with these units and would no longer add up; correct {label} first."
     return (
