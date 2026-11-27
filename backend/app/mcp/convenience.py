@@ -26,7 +26,8 @@ rules for agent use (brief rules 5-8) need a place to live that is NOT a route c
   same way, a job that was already on the floor is left there, and a manual nest is
   refused on a job whose nests came from a package import (rule 6, the other way).
 - ``add_operation`` refuses operation names that are really file names or DXF export
-  labels, and resolves a work center by NAME so an agent need not know ids.
+  labels, resolves a work center by NAME so an agent need not know ids, and refuses (409)
+  a work order that is not a DRAFT: a released job's routing is a person's change.
 
 Each convenience tool SHADOWS the generated tool for the same route (the pairs in
 ``SHADOWED_OPERATIONS`` are dropped from the catalog) so that there is exactly one
@@ -459,6 +460,16 @@ _ADD_OPERATION_PASSTHROUGH = (
     "operation_group",
 )
 
+# Adding a step to a released work order is a routing change: a person's judgment, with their
+# typed reason as REQUIRED audit evidence (owner decision 2026-11-25). The tool never sends a
+# reason, so the route's 422 also stands if the job is released between this tool's read and its
+# POST.
+ADD_OPERATION_DRAFT_ONLY = (
+    "add_operation adds steps to a DRAFT work order only; this one is {status}. Changing the routing of a "
+    "released work order (adding, skipping, restoring or reordering steps) is a person's judgment and needs "
+    "their reason: tell the user to do it signed in to the app."
+)
+
 
 def operation_name_rejection(name: str) -> Optional[str]:
     """Why ``name`` is not an operation name (rule 7), or None when it is fine."""
@@ -513,8 +524,7 @@ async def _resolve_work_center(ctx: ToolContext, spec: Any) -> int:
     )
 
 
-async def _next_sequence(ctx: ToolContext, work_order_id: int) -> int:
-    work_order = await ctx.call_json("GET", f"{API}/work-orders/{work_order_id}") or {}
+def _next_sequence(work_order: Mapping[str, Any]) -> int:
     sequences = [int(op.get("sequence") or 0) for op in work_order.get("operations") or []]
     if not sequences:
         return 10
@@ -536,10 +546,19 @@ async def _add_operation(ctx: ToolContext, args: Dict[str, Any]) -> types.CallTo
         )
     if "quantity" in args:
         raise ctx.fail(status=422, detail=OPERATION_HAS_NO_QUANTITY, method="POST", path=path)
+    work_order = await ctx.call_json("GET", f"{API}/work-orders/{work_order_id}") or {}
+    status = str(work_order.get("status") or "").lower()
+    if status != WO_DRAFT:
+        raise ctx.fail(
+            status=409,
+            detail=ADD_OPERATION_DRAFT_ONLY.format(status=(status or "not a draft").upper()),
+            method="POST",
+            path=path,
+        )
     work_center_id = await _resolve_work_center(ctx, args["work_center"])
     sequence = args.get("sequence")
     if sequence is None:
-        sequence = await _next_sequence(ctx, work_order_id)
+        sequence = _next_sequence(work_order)
     body: Dict[str, Any] = {"name": name.strip(), "work_center_id": work_center_id, "sequence": sequence}
     body.update(_present(args, *_ADD_OPERATION_PASSTHROUGH))
     result = await ctx.call("POST", path, json=body)
@@ -1331,8 +1350,9 @@ CONVENIENCE_TOOLS: Tuple[ConvenienceTool, ...] = (
         "POST /api/v1/work-orders/{id}/operations — Add one routing step to a work order. Work center by id OR name; "
         "sequence defaults to the next multiple of 10. Operation names must be short shop-floor steps — file names, "
         "paths and 'Part Detail' are refused, not rewritten. An operation has no quantity of its own (it runs the "
-        "work order's quantity_ordered); component_quantity is BOM component demand. Not for laser nest work "
-        "orders. [Work Orders]",
+        "work order's quantity_ordered); component_quantity is BOM component demand. DRAFT work orders only: a "
+        "released job's routing is changed by a person in the app (refused 409). Not for laser nest work orders. "
+        "[Work Orders]",
         _strict(_ADD_OPERATION_SCHEMA),
         _MUTATE,
         _add_operation,

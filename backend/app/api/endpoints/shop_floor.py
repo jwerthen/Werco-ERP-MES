@@ -161,6 +161,7 @@ from app.services.operation_action_gates import (
     MSG_ALREADY_IN_PROGRESS,
     MSG_NO_LABOR_RECORDED,
     MSG_OPERATION_ON_HOLD_NO_START,
+    MSG_OPERATION_SKIPPED,
     MSG_PREDECESSORS_INCOMPLETE,
     MSG_REOPEN_IS_OFFICE_ONLY,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
@@ -174,6 +175,7 @@ from app.services.operation_action_gates import (
     exceeds_recorded_message,
     get_open_time_entry,
     good_above_ceiling_message,
+    lock_operation_for_start,
     operation_blocked_by_predecessors,
     operation_has_labor_evidence,
     others_clocked_in_message,
@@ -212,6 +214,7 @@ from app.services.wallboard_service import (
 )
 from app.services.work_order_blocker_service import blocker_default_title
 from app.services.work_order_state_service import (
+    FINISHED_OPERATION_STATUSES,
     QTY_EPSILON,
     TERMINAL_WO_STATUSES,
     OperationAccounting,
@@ -224,6 +227,7 @@ from app.services.work_order_state_service import (
     finalize_operation_completion,
     find_parent_to_advance,
     floor_operation_quantity_at_evidence,
+    is_operation_finished,
     operation_accounting,
     operation_target_quantity,
     promote_ready_operations,
@@ -1766,6 +1770,10 @@ def clock_in(
 
     if existing:
         raise HTTPException(status_code=400, detail="You are already clocked in to this operation.")
+
+    # Row-locked before the predecessor gate below is read, so a concurrent routing change
+    # (skip / unskip / add / resequence) and this clock-in serialize (lock_operation_for_start).
+    lock_operation_for_start(db, clock_in_data.operation_id, company_id)
 
     # Verify work order and operation (scoped to the active company so a guessed
     # foreign operation_id cannot drive another tenant's operation/WO IN_PROGRESS)
@@ -4155,8 +4163,8 @@ def get_all_operations(
         except ValueError:
             pass  # Invalid status, ignore filter
     else:
-        # Default: exclude completed operations
-        query = query.filter(WorkOrderOperation.status != OperationStatus.COMPLETE)
+        # Default: exclude finished operations (COMPLETE, and SKIPPED steps taken off the route)
+        query = query.filter(WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES))
 
     # Search by WO number or part number
     if search:
@@ -4202,7 +4210,7 @@ def get_all_operations(
     # AUD-3: terminal reconcile-driven transitions are audited to the requesting user.
     _reconcile_and_commit(db, work_orders, current_user, company_id)
     if not status:
-        operations = [op for op in operations if op.status != OperationStatus.COMPLETE]
+        operations = [op for op in operations if not is_operation_finished(op.status)]
 
     # Gap-free RUN rank, same contract as the kiosk queue payload: position of the
     # operation within its work center's LIVE dispatch queue (queued_operations --
@@ -4391,6 +4399,9 @@ def start_operation(
     complete / closed / cancelled; **409** when the OPERATION is on hold -- starting does
     not lift a hold, Resume / Clear Hold does; earlier operations incomplete (400).
     """
+    # Row-locked before the predecessor gate is read (lock_operation_for_start): a concurrent
+    # routing change cannot put an unfinished step in front of the start it judged.
+    lock_operation_for_start(db, operation_id, company_id)
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -4407,6 +4418,8 @@ def start_operation(
     # Validate operation can be started
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail="Operation is already complete")
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
 
     if operation.status == OperationStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail=MSG_ALREADY_IN_PROGRESS)
@@ -6015,6 +6028,10 @@ def mark_operation_inspected(
     # else, and a sign-off on it would be evidence for work nobody can see.
     if not operation or not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Operation not found")
+    # A skipped step never ran, so there is nothing to have inspected: a sign-off on it would be
+    # quality evidence for work that did not happen. Restoring the step reopens it to sign-off.
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
 
     was_complete = bool(operation.inspection_complete)
     old_type = operation.inspection_type

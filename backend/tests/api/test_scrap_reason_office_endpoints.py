@@ -294,7 +294,7 @@ def test_put_operation_partial_update_without_scrap_field_succeeds(client: TestC
 
     resp = client.put(
         f"/api/v1/work-orders/operations/{op_id}",
-        json={"version": op.version, "name": "Renamed Op"},
+        json={"version": op.version, "name": "Renamed Op", "change_reason": "routing test edit"},
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
@@ -809,7 +809,7 @@ def test_put_operation_as_operator_is_403_and_persists_nothing(client: TestClien
 
     resp = client.put(
         f"/api/v1/work-orders/operations/{op_id}",
-        json={"version": op.version, "name": "Operator Edit Attempt"},
+        json={"version": op.version, "name": "Operator Edit Attempt", "change_reason": "routing test edit"},
         headers=headers_for(operator),
     )
     assert resp.status_code == status.HTTP_403_FORBIDDEN, resp.text
@@ -848,7 +848,7 @@ def test_put_operation_as_supervisor_still_succeeds(client: TestClient, db_sessi
 
     resp = client.put(
         f"/api/v1/work-orders/operations/{op_id}",
-        json={"version": op.version, "name": "Supervisor Renamed Op"},
+        json={"version": op.version, "name": "Supervisor Renamed Op", "change_reason": "routing test edit"},
         headers=headers_for(supervisor),
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text

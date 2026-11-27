@@ -58,6 +58,11 @@ const crewText = (op: DispatchLaneOp) =>
  */
 export function OperationState({ lane, op }: { lane: DispatchLane; op: DispatchLaneOp }) {
   const status = opStatus(op);
+  if (status === 'skipped') {
+    return (
+      <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-400">Skipped</span>
+    );
+  }
   if (status === 'complete') {
     return (
       <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-green-300">
@@ -199,7 +204,8 @@ export function DispatchPoolOperations({
   const [dropSlot, setDropSlot] = useState<OpDropSlot | null>(null);
   const workCenterName = (id: number | null) => workCenters.find(center => center.id === id)?.name ?? null;
   const activeTargets = workCenters.filter(center => center.is_active !== false);
-  const selectable = (op: DispatchLaneOp) => canEdit && !opIsRunning(op) && opStatus(op) !== 'complete';
+  const selectable = (op: DispatchLaneOp) =>
+    canEdit && !opIsRunning(op) && opStatus(op) !== 'complete' && opStatus(op) !== 'skipped';
   // A selection only ever names operations that are still movable (a poll can
   // start one under the planner), so the batch never carries a pinned job.
   const selectedOps = lane.operations.filter(op => selected.includes(op.operation_id) && selectable(op));
@@ -426,6 +432,9 @@ function PoolOperationRow({
   const queued = queuedIndex >= 0;
   const running = opIsRunning(op);
   const complete = opStatus(op) === 'complete';
+  // A skipped step is off the route: the server refuses every write to it
+  // (machine moves included) until it is restored.
+  const skipped = opStatus(op) === 'skipped';
   const reorderReason = !canEdit
     ? ROLE_PIN_REASON
     : blockedReason
@@ -444,9 +453,11 @@ function PoolOperationRow({
       ? RUNNING_MOVE_REASON
       : complete
         ? 'Completed operations cannot be moved to another work center.'
-        : busy
-          ? SAVING_REASON
-          : undefined;
+        : skipped
+          ? 'Skipped steps are off the route; restore the step first.'
+          : busy
+            ? SAVING_REASON
+            : undefined;
   const nestSegments = nestDetailSegments(op.laser_nest);
   const tieChip = materialTieChip(op);
   const crew = crewText(op);
@@ -567,7 +578,7 @@ function PoolOperationRow({
               <select
                 aria-label={`Move ${label} to another machine`}
                 title={moveReason || 'Move this operation to another machine'}
-                disabled={running || complete || targets.length === 0}
+                disabled={running || complete || skipped || targets.length === 0}
                 aria-disabled={busy || undefined}
                 value=""
                 onChange={event => {

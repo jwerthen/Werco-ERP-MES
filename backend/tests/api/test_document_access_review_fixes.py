@@ -419,7 +419,11 @@ def test_work_order_put_release_and_operation_put_hide_a_hidden_nest_pdf(w: Worl
     operation_put = w.put(
         f"/work-orders/operations/{w.operation.id}",
         "admin",
-        json={"version": w.fresh(type(w.operation), w.operation.id).version, "name": "Laser cut"},
+        json={
+            "version": w.fresh(type(w.operation), w.operation.id).version,
+            "name": "Laser cut",
+            "change_reason": "routing test edit",
+        },
     )
     assert operation_put.status_code == 200, operation_put.text
     _assert_nest_hidden(operation_put.json())

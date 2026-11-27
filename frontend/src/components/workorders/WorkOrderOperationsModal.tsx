@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { isOperationFinished } from '../../utils/routingChange';
 import { Link } from 'react-router-dom';
 import { ArrowPathIcon, ArrowTopRightOnSquareIcon, CheckCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
@@ -47,7 +48,8 @@ function completionBlockReason(operation: WorkOrderOperation, workOrder: WorkOrd
   }
   if (workOrder.sequential_operations && workOrder.work_order_type !== 'laser_cutting') {
     const previous = workOrder.operations
-      .filter(candidate => candidate.sequence < operation.sequence && candidate.status !== 'complete')
+      // SKIPPED is finished for the gate, as on the server (FINISHED_OPERATION_STATUSES).
+      .filter(candidate => candidate.sequence < operation.sequence && !isOperationFinished(candidate.status))
       .sort((a, b) => a.sequence - b.sequence)[0];
     if (previous) return `Complete operation ${operationNumberText(previous.operation_number, previous.sequence)} (${previous.name}) first.`;
   }
@@ -183,7 +185,9 @@ export default function WorkOrderOperationsModal({
   };
 
   const operations = sortOperationsForDisplay(workOrder?.operations || []);
-  const completeCount = operations.filter(operation => operation.status === 'complete').length;
+  // Finished = complete or skipped: the server completes a work order whose remaining steps
+  // were skipped, so a skipped step counts toward the header like a completed one.
+  const completeCount = operations.filter(operation => isOperationFinished(operation.status)).length;
   const active = workOrder && ['released', 'in_progress', 'on_hold'].includes(workOrder.status);
   const disabled = loading || loadError || submitting;
   const close = () => {
@@ -320,13 +324,13 @@ export default function WorkOrderOperationsModal({
                               <span className="text-fd-amber"> · {formatShortQuantity(unaccounted)} unaccounted</span>
                             )}
                           </p>
-                          {blockReason && active && operation.status !== 'complete' && (
+                          {blockReason && active && !isOperationFinished(operation.status) && (
                             <p className="text-xs text-fd-amber">{blockReason}</p>
                           )}
                         </div>
                         <div className="flex shrink-0 items-center justify-between gap-3 sm:justify-end">
                           <StatusBadge status={operation.cancelled_nest_id != null ? 'cancelled' : operation.status} />
-                          {canComplete && active && operation.status !== 'complete' && (
+                          {canComplete && active && !isOperationFinished(operation.status) && (
                             <Button
                               size="sm"
                               disabled={disabled || !!blockReason}

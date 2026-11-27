@@ -23,7 +23,7 @@ from app.schemas.work_center import WorkCenterCreate, WorkCenterResponse, WorkCe
 from app.services.audit_service import AuditService
 from app.services.import_service import ImportFileError, parse_import_file
 from app.services.work_center_type_service import get_work_center_types, normalize_work_center_type
-from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+from app.services.work_order_state_service import FINISHED_OPERATION_STATUSES, TERMINAL_WO_STATUSES
 
 router = APIRouter()
 
@@ -60,7 +60,7 @@ def _live_work_refusal(db: Session, company_id: int, work_center: WorkCenter) ->
             WorkOrder.is_deleted == False,  # noqa: E712
             WorkOrder.status.not_in(TERMINAL_WO_STATUSES),
             WorkOrderOperation.work_center_id == work_center.id,
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
         )
         .group_by(WorkOrderOperation.status)
         .all()

@@ -543,7 +543,8 @@ _SCENARIOS: Dict[str, List[Dict[str, Any]]] = {
     "search": [{"q": "bracket"}],
     "list_work_centers": [{}, {"name": "laser"}],
     "create_work_order": [{"part_id": 1, "quantity_ordered": 2}],
-    "add_operation": [{"work_order_id": 5, "name": "Weld", "work_center": "Laser"}],
+    # A DRAFT work order: add_operation refuses any other (a released job's routing is a person's change).
+    "add_operation": [{"work_order_id": _ScriptedExecutor.DRAFT_LASER_ID, "name": "Weld", "work_center": "Laser"}],
     "get_work_order": [{"work_order_id": 5}, {"work_order_number": "WO-5"}],
     "update_work_order": [{"work_order_id": 5, "version": 1, "priority": 2}],
     "duplicate_work_order": [{"work_order_id": 5}],

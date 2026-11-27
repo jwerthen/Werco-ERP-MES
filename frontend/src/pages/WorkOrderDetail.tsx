@@ -37,6 +37,8 @@ import DuplicateWorkOrderModal from '../components/workorders/DuplicateWorkOrder
 import SaveAsTemplateModal from '../components/workorders/SaveAsTemplateModal';
 import BackflushPreviewPanel from '../components/workorders/BackflushPreviewPanel';
 import OperationHoursSource from '../components/workorders/OperationHoursSource';
+import RoutingEditor from '../components/workorders/RoutingEditor';
+import { isOperationFinished, routingEditableWorkOrder } from '../utils/routingChange';
 import OperationStepsPanel from '../components/processSheets/OperationStepsPanel';
 import {
   extractStepsBypassed,
@@ -439,7 +441,9 @@ const formatFileSize = (bytes?: number | null) => {
 const getOperationProgressMetrics = (workOrder: WorkOrder) => {
   // Cancelled nests keep their operation rows for history and restoration, but
   // their planned work no longer contributes to the active route's progress.
-  const operations = (workOrder.operations || []).filter(op => op.cancelled_nest_id == null);
+  // A SKIPPED step (taken off a released job) produced nothing and is no obligation, so it is
+  // left out of progress exactly as the server's `active_work_order_operations` leaves it out.
+  const operations = (workOrder.operations || []).filter(op => op.cancelled_nest_id == null && op.status !== 'skipped');
   if (operations.length === 0) {
     const ordered = Number(workOrder.quantity_ordered || 0);
     const complete = Number(workOrder.quantity_complete || 0);
@@ -615,6 +619,12 @@ export default function WorkOrderDetail() {
   // `get_current_user`, any authenticated tenant user, which is why the copy
   // under the hidden button points there.
   const canResolveBlocker = canCorrectCount;
+  // Changing the routing (add / skip / restore / reorder / edit a step) is
+  // require_role([ADMIN, MANAGER, SUPERVISOR]) on every route — exactly what
+  // work_orders:edit maps to. The work-order half (terminal, laser, deleted) is
+  // `routingEditableWorkOrder`, evaluated where the work order is in hand.
+  const canChangeRouting = canCorrectCount;
+  const [routingEditorOpen, setRoutingEditorOpen] = useState(false);
   const [workOrder, setWorkOrder] = useState<WorkOrder | null>(null);
 
   // Inline due-date edit shares the same work_orders:edit tier, AND is refused on a
@@ -1768,7 +1778,9 @@ export default function WorkOrderDetail() {
     if (!workOrder || !sequencingApplies || !sequentialOperations) return null;
     return workOrder.operations.reduce<WorkOrderOperation | null>(
       (lowest, candidate) =>
-        candidate.status === 'complete' || (lowest !== null && lowest.sequence <= candidate.sequence)
+        // SKIPPED is finished for the gate (server: FINISHED_OPERATION_STATUSES), so a skipped
+        // step never blocks the ones after it.
+        isOperationFinished(candidate.status) || (lowest !== null && lowest.sequence <= candidate.sequence)
           ? lowest
           : candidate,
       null
@@ -2848,7 +2860,14 @@ export default function WorkOrderDetail() {
       {/* Operations */}
       <div className="card card-compact">
         <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <h2 className="card-title">Operations / Routing</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="card-title">Operations / Routing</h2>
+            {canChangeRouting && routingEditableWorkOrder(workOrder) && !routingEditorOpen && (
+              <Button size="sm" variant="secondary" onClick={() => setRoutingEditorOpen(true)}>
+                <PencilSquareIcon className="mr-1 h-4 w-4" aria-hidden="true" /> Edit routing
+              </Button>
+            )}
+          </div>
           {/* Operation sequencing mode. Rendered beside the routing it governs,
               because the Status column below is what it changes. */}
           {!sequencingApplies ? (
@@ -2905,6 +2924,10 @@ export default function WorkOrderDetail() {
             </div>
           )}
         </div>
+
+        {canChangeRouting && routingEditableWorkOrder(workOrder) && routingEditorOpen && (
+          <RoutingEditor workOrder={workOrder} onChanged={loadWorkOrder} onClose={() => setRoutingEditorOpen(false)} />
+        )}
 
         {workOrder.operations.length === 0 ? (
           <EmptyState
@@ -3075,6 +3098,25 @@ export default function WorkOrderDetail() {
                                 make exactly that case read as anonymous AND reasonless.
                                 Free text is read straight off note/title: this response
                                 withholds nothing, and `has_note` is not sent. */}
+                              {op.status === 'skipped' && (
+                                <div
+                                  className="mt-2 min-w-[14rem] rounded-sm border border-fd-line bg-slate-900/50 px-2 py-1.5 text-xs text-slate-300"
+                                  data-testid={`op-skipped-${op.id}`}
+                                >
+                                  <div className="font-semibold uppercase tracking-wide text-slate-400">Skipped</div>
+                                  <p className="mt-1">{op.skip_reason || 'No reason recorded'}</p>
+                                  <div className="mt-1 text-slate-500">
+                                    {op.skipped_by_name
+                                      ? op.skipped_by_name
+                                      : op.skipped_by != null
+                                        ? op.skipped_by === user?.id
+                                          ? 'You'
+                                          : userNameById[op.skipped_by] || `User #${op.skipped_by}`
+                                        : 'Who skipped it was not recorded'}
+                                    {op.skipped_at ? ` \u00b7 ${formatDateTimeCT(op.skipped_at)}` : ''}
+                                  </div>
+                                </div>
+                              )}
                               {cancelledNest && (
                                 <p className="mt-2 text-xs text-amber-300">
                                   This nest was cancelled. Restore it to return its planned runs to this work order.
@@ -3162,8 +3204,10 @@ export default function WorkOrderDetail() {
                                   requiresInspection={Boolean(op.requires_inspection)}
                                   inspectionComplete={Boolean(op.inspection_complete)}
                                   inspectionType={op.inspection_type}
-                                  /* A cancelled nest keeps its chip but is not signable. */
-                                  canSignOff={canSignOff && !cancelledNest}
+                                  /* A cancelled nest keeps its chip but is not signable, and
+                                     neither is a skipped step: it never ran, so there is no
+                                     work to inspect. Restore it first. */
+                                  canSignOff={canSignOff && !cancelledNest && op.status !== 'skipped'}
                                   onSignedOff={() => loadWorkOrder()}
                                 />
                               </div>
@@ -3241,7 +3285,7 @@ export default function WorkOrderDetail() {
                                 decide what stock it eats. The dialog is always
                                 OPERATION-scoped; it never creates a
                                 whole-work-order tie. */}
-                              {canEditMaterialTies && (
+                              {canEditMaterialTies && op.status !== 'skipped' && (
                                 <button
                                   type="button"
                                   onClick={() => setTieTarget(op)}
@@ -3253,7 +3297,7 @@ export default function WorkOrderDetail() {
                               )}
                               {canCompleteOperation &&
                                 !cancelledNest &&
-                                op.status !== 'complete' &&
+                                !isOperationFinished(op.status) &&
                                 workOrder.status !== 'draft' && (
                                   <button
                                     onClick={() => handleCompleteOperation(op)}

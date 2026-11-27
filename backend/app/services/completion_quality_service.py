@@ -34,10 +34,10 @@ from sqlalchemy.orm import Session
 
 from app.models.time_entry import TimeEntry
 from app.models.user import User
-from app.models.work_order import OperationStatus, WorkOrder, WorkOrderOperation
+from app.models.work_order import WorkOrder, WorkOrderOperation
 from app.services.audit_service import AuditService
 from app.services.quality_gate_service import QualityException, record_completion_quality_exceptions
-from app.services.work_order_state_service import active_work_order_operations
+from app.services.work_order_state_service import active_work_order_operations, is_operation_finished
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def record_reconcile_labor_data_quality(
     try:
         # Only meaningful once the route is complete; if the WO somehow isn't complete,
         # skip (the live path will catch it on the next real completion).
-        if not all(op.status == OperationStatus.COMPLETE for op in (work_order.operations or [])):
+        if not all(is_operation_finished(op.status) for op in (work_order.operations or [])):
             return
         evaluate_and_record_labor_data_quality(
             db,

@@ -32,6 +32,7 @@ from app.services.scheduling_projection import (
     _project_work_order_schedule,
     _projection_daily_load,
 )
+from app.services.work_order_state_service import FINISHED_OPERATION_STATUSES
 from app.services.working_calendar_service import load_working_calendars, working_hours
 
 logger = logging.getLogger(__name__)
@@ -191,7 +192,7 @@ class SchedulingService:
                 WorkOrderOperation.work_center_id == wc.id,
                 WorkOrderOperation.scheduled_start != None,
                 WorkOrderOperation.scheduled_start <= end_date,
-                WorkOrderOperation.status != OperationStatus.COMPLETE,
+                WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
             )
             if self.company_id is not None:
                 op_query = op_query.filter(WorkOrderOperation.company_id == self.company_id)
@@ -465,7 +466,7 @@ class SchedulingService:
             WorkOrderOperation.scheduled_start != None,
             WorkOrderOperation.scheduled_start >= start_date,
             WorkOrderOperation.scheduled_start <= end_date,
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
         )
 
         if self.company_id is not None:
@@ -509,7 +510,7 @@ class SchedulingService:
                     .filter(
                         WorkOrderOperation.company_id == wc.company_id,
                         WorkOrderOperation.work_center_id == wc.id,
-                        WorkOrderOperation.status != OperationStatus.COMPLETE,
+                        WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
                         WorkOrderOperation.scheduled_start.isnot(None),
                     )
                     .all()

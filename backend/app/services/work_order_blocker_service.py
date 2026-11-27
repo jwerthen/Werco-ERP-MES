@@ -24,7 +24,7 @@ from app.services.ai_learning_service import stale_open_recommendations
 from app.services.audit_service import AuditService
 from app.services.operation_action_gates import operation_blocked_by_predecessors
 from app.services.operational_event_service import OperationalEventService, redact_event_payload
-from app.services.work_order_state_service import TERMINAL_WO_STATUSES
+from app.services.work_order_state_service import TERMINAL_WO_STATUSES, is_operation_finished
 
 
 def _enum_value(value) -> str:
@@ -230,7 +230,7 @@ class WorkOrderBlockerService:
         self.db.flush()
 
         operation_previous_status = None
-        if data.put_operation_on_hold and operation and operation.status != OperationStatus.COMPLETE:
+        if data.put_operation_on_hold and operation and not is_operation_finished(operation.status):
             operation_previous_status = _enum_value(operation.status)
             operation.status = OperationStatus.ON_HOLD
             operation.updated_at = datetime.utcnow()

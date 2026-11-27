@@ -601,11 +601,17 @@ class TestOperationPutOnACompleteOperation:
         set_op(db_session, op, quantity_complete=10)
         resp = client.put(
             OPERATION_PUT_URL.format(op=op.id),
-            json={"version": op.version, "quantity_complete": 10, "status": "complete", "name": "Renamed step"},
+            json={"version": op.version, "quantity_complete": 10, "status": "complete", "scrap_reason": None},
             headers=user_headers(supervisor),
         )
         assert resp.status_code == 200, resp.text
-        assert fresh(db_session, WorkOrderOperation, op.id).name == "Renamed step"
+        # Routing changes (2026-11-25): a COMPLETE step's content is its record -- renaming it is refused.
+        renamed = client.put(
+            OPERATION_PUT_URL.format(op=op.id),
+            json={"version": fresh(db_session, WorkOrderOperation, op.id).version, "name": "Renamed step"},
+            headers=user_headers(supervisor),
+        )
+        assert renamed.status_code == 409, renamed.text
 
     def test_an_open_operation_keeps_its_editable_counts(self, client, db_session, supervisor):
         wc = make_work_center(db_session)
@@ -856,7 +862,7 @@ def test_the_blocked_by_scope_needs_the_reopened_operation(db_session: Session):
     """The one demotion core refuses a ``blocked_by`` demotion with nothing to be blocked by."""
     from app.services.work_order_state_service import DEMOTION_SCOPES, demote_ready_operations
 
-    assert DEMOTION_SCOPES == ("sequencing", "all_unworked", "blocked_by")
+    assert DEMOTION_SCOPES == ("sequencing", "all_unworked", "blocked_by", "newly_blocked")
     wc = make_work_center(db_session)
     wo, _ = make_routing(db_session, work_centers=[wc])
     with pytest.raises(ValueError):

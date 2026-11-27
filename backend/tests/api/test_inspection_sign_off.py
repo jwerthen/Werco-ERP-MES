@@ -433,7 +433,7 @@ def test_sign_off_bumps_the_operation_version_so_a_stale_update_is_409(client: T
 
     stale = client.put(
         f"/api/v1/work-orders/operations/{op.id}",
-        json={"version": stale_version, "requires_inspection": False},
+        json={"version": stale_version, "requires_inspection": False, "change_reason": "routing test edit"},
         headers=headers_for(supervisor),
     )
     assert stale.status_code == status.HTTP_409_CONFLICT, stale.text
@@ -478,7 +478,7 @@ def test_generic_update_still_sets_requires_inspection_and_leaves_the_sign_off_a
 
     resp = client.put(
         f"/api/v1/work-orders/operations/{op.id}",
-        json={"version": op.version, "requires_inspection": False},
+        json={"version": op.version, "requires_inspection": False, "change_reason": "routing test edit"},
         headers=headers_for(supervisor),
     )
 

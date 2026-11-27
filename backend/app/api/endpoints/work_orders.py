@@ -34,7 +34,7 @@ from app.api.deps import get_audit_service, get_current_company_id, get_current_
 from app.api.endpoints.bom import tenant_parts_by_id
 from app.api.endpoints.user_workspaces import require_workspace_access
 from app.core.cache import invalidate_work_centers_cache
-from app.core.credentials import is_api_token_credential, is_narrowed_api_token
+from app.core.credentials import API_TOKEN_ROUTING_CHANGE, is_api_token_credential, is_narrowed_api_token
 from app.core.observability import report_absorbed_exception
 from app.core.realtime import safe_broadcast
 from app.core.time_utils import to_utc_iso
@@ -72,13 +72,18 @@ from app.schemas.work_order import (
     WorkOrderCreate,
     WorkOrderDuplicateRequest,
     WorkOrderDuplicateResponse,
-    WorkOrderOperationCreate,
+    WorkOrderOperationAddRequest,
     WorkOrderOperationResponse,
+    WorkOrderOperationSkipRequest,
+    WorkOrderOperationsResequenceRequest,
+    WorkOrderOperationUnskipRequest,
     WorkOrderOperationUpdate,
     WorkOrderProcessSheetGapResponse,
+    WorkOrderResequenceResponse,
     WorkOrderResponse,
     WorkOrderRestoreResponse,
     WorkOrderResumeResponse,
+    WorkOrderRoutingChangeResponse,
     WorkOrderSummary,
     WorkOrderUpdate,
 )
@@ -86,6 +91,7 @@ from app.schemas.work_order_timeline import TimelineCategory, WorkOrderTimelineR
 from app.services import (
     dispatch_service,
     process_sheet_service,
+    routing_change_service,
     work_order_process_sheet_service,
     work_order_release_service,
 )
@@ -159,6 +165,7 @@ from app.services.operation_action_gates import (
     MSG_ALREADY_IN_PROGRESS,
     MSG_DRAFT_CANNOT_BE_HELD,
     MSG_OPERATION_ON_HOLD_NO_START,
+    MSG_OPERATION_SKIPPED,
     MSG_PREDECESSORS_INCOMPLETE,
     MSG_RETURN_TO_DRAFT_AUDIT_UNAVAILABLE,
     MSG_SCRAP_REASON_OR_CODE_REQUIRED,
@@ -174,6 +181,7 @@ from app.services.operation_action_gates import (
     force_complete_exceeds_physical_message,
     force_complete_exceeds_recorded_message,
     force_complete_unaccounted_message,
+    lock_operation_for_start,
     no_labor_reduction_exceeds_message,
     office_no_change_message,
     open_count_above_ceiling_message,
@@ -246,6 +254,7 @@ from app.services.work_order_state_service import (
     finalize_operation_completion,
     find_parent_to_advance,
     is_laser_dispatch_work_order,
+    is_operation_finished,
     log_demotions_required,
     operation_accounting,
     operation_hours_source,
@@ -976,8 +985,25 @@ def _enrich_work_order_operations(work_order: WorkOrder, *, db: Session, company
     with db.no_autoflush:
         labor_evidence = operation_labor_evidence(db, company_id, [op.id for op in work_order.operations])
 
+    # WHO SKIPPED a step (routing change on a released job, migration 135): ``skipped_by`` is an
+    # id; the display name comes from ONE batched, tenant-scoped User read, skipped entirely when
+    # nothing is skipped (the common path costs zero queries). Same display form as
+    # ``held_by_name`` ("Dana R."). Under ``no_autoflush``: a render must never flush.
+    skipper_ids = {op.skipped_by for op in work_order.operations if op.skipped_by is not None}
+    skipper_names: Dict[int, Optional[str]] = {}
+    if skipper_ids:
+        with db.no_autoflush:
+            skipper_names = {
+                user_id: operator_display_name(first_name, last_name)
+                for user_id, first_name, last_name in tenant_query(db, User, company_id)
+                .filter(User.id.in_(skipper_ids))
+                .with_entities(User.id, User.first_name, User.last_name)
+                .all()
+            }
+
     for op in work_order.operations:
         op.cancelled_nest_id = cancelled_nests.get(op.id)
+        op.skipped_by_name = skipper_names.get(op.skipped_by) if op.skipped_by is not None else None
         # Only an ON_HOLD row carries provenance; every other row is explicitly None rather
         # than left unset, so the response shape does not depend on attribute presence.
         #
@@ -4703,7 +4729,9 @@ def update_work_order(
     retargeted_operations = (
         rescale_restated_operation_targets(
             work_order,
-            active_work_order_operations(work_order),
+            # A SKIPPED step's stored target moves with the order too, so a later restore
+            # does not bring back a target the order no longer has.
+            active_work_order_operations(work_order, include_skipped=True),
             old_quantity_ordered,
             float(work_order.quantity_ordered),
         )
@@ -4919,7 +4947,7 @@ def update_work_order_priority(
         {
             op.work_center_id
             for op in work_order.operations
-            if op.work_center_id and op.status != OperationStatus.COMPLETE
+            if op.work_center_id and not is_operation_finished(op.status)
         }
     )
     for wc_id in work_center_ids:
@@ -5977,7 +6005,9 @@ def complete_work_order(
     # and stamp them on the force-complete audit row + the response below.
     steps_bypassed_all: list[dict] = []
     for operation in operations:
-        if operation.status == OperationStatus.COMPLETE:
+        # Finished = COMPLETE or SKIPPED: a skipped step is never force-completed (``operations``
+        # is the active set, which already leaves skipped steps out; this keeps it explicit).
+        if is_operation_finished(operation.status):
             continue
         # ONE vocabulary per collection: the fallback yields the bare sequence, exactly like
         # the ON_HOLD refusal above -- never a display label. These entries are stamped on the
@@ -6008,7 +6038,9 @@ def complete_work_order(
     # so the WC cache must be invalidated by us after the terminal commit succeeds).
     work_centers_refreshed = False
     for operation in operations:
-        if operation.status == OperationStatus.COMPLETE:
+        # Finished = COMPLETE or SKIPPED: a skipped step is never force-completed (``operations``
+        # is the active set, which already leaves skipped steps out; this keeps it explicit).
+        if is_operation_finished(operation.status):
             continue
         op_old_status = operation.status.value if operation.status else None
         if not operation.actual_start:
@@ -6310,14 +6342,32 @@ def complete_work_order(
 @router.post("/{work_order_id}/operations", response_model=WorkOrderOperationResponse)
 def add_operation(
     work_order_id: int,
-    operation_in: WorkOrderOperationCreate,
+    operation_in: WorkOrderOperationAddRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
     company_id: int = Depends(get_current_company_id),
 ):
-    """Add an operation to a work order"""
-    work_order = db.query(WorkOrder).filter(WorkOrder.id == work_order_id, WorkOrder.company_id == company_id).first()
-    if not work_order:
+    """Add one step to a work order's routing.
+
+    On a DRAFT work order this is how the plan is built (``change_reason`` optional). Once the
+    work order has been released (owner decision 2026-11-25) it is a routing change:
+    ``change_reason`` is required (**422** without it) and written to the REQUIRED audit row
+    (**503**, nothing saved, when it cannot be), a standing API token is refused **403**, and the
+    new step's ``sequence`` may not collide with a step that is not skipped (**409**), nor sit in
+    front of a step that already has recorded work under the work order's own predecessor rule
+    (**409** -- on a sequenced routing any lower sequence; on a pooled one a lower sequence at a
+    different work center), nor strand a short-count close (**409**). Un-worked READY steps the
+    new one now blocks go back to PENDING (audited); the new step itself becomes READY when its
+    predecessors are finished. **404** for a missing or deleted work order or another company's
+    work center; **409** for a complete / closed / cancelled work order; **400** for a laser
+    nest work order (add a nest instead). **404** also for a ``component_part_id`` that is not one
+    of this company's live parts.
+    """
+    # Row-locked: every routing change on one work order serializes, operation rows first and then
+    # the work order row (routing_change_service.lock_work_order).
+    work_order = routing_change_service.lock_work_order(db, work_order_id, company_id)
+    if not work_order or work_order.is_deleted:
         raise HTTPException(status_code=404, detail="Work order not found")
 
     # Laser nest WOs are DISPATCH POOLS whose every op is a nest, exempt from
@@ -6334,15 +6384,194 @@ def add_operation(
     # Tenancy: the work center is caller-supplied, so it must be proven to belong
     # to the active company before it is written onto the row.
     _assert_work_center_in_company(db, operation_in.work_center_id, company_id)
+    # The component part is caller-supplied too: a foreign (or deleted) part id must never be
+    # written onto this company's routing. 404, like the work center: indistinguishable from none.
+    if operation_in.component_part_id is not None:
+        component = tenant_parts_by_id(db, [operation_in.component_part_id], company_id).get(
+            operation_in.component_part_id
+        )
+        if component is None or component.is_deleted:
+            raise HTTPException(status_code=404, detail="Component part not found")
 
-    operation = WorkOrderOperation(
-        work_order_id=work_order_id, company_id=work_order.company_id, **operation_in.model_dump()
-    )
-    db.add(operation)
+    audit = AuditService(db, current_user, request)
+    values = operation_in.model_dump(exclude={"change_reason"})
+    with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
+        outcome = routing_change_service.add_operation(
+            db,
+            work_order,
+            values,
+            change_reason=operation_in.change_reason,
+            user=current_user,
+            audit=audit,
+        )
     db.commit()
+    operation = outcome.operation
+    assert operation is not None
     db.refresh(operation)
     _scope_operation_nests([operation], current_user)
     return operation
+
+
+def _routing_change_response(
+    db: Session, outcome: "routing_change_service.RoutingChangeOutcome", work_order: WorkOrder, current_user: User
+) -> WorkOrderRoutingChangeResponse:
+    operation = outcome.operation
+    assert operation is not None
+    db.refresh(operation)
+    db.refresh(work_order)
+    _scope_operation_nests([operation], current_user)
+    return WorkOrderRoutingChangeResponse(
+        operation=WorkOrderOperationResponse.model_validate(operation),
+        promoted_operation_ids=[op.id for op in outcome.promoted if op.id is not None],
+        demoted_operation_ids=[op.id for op in outcome.demoted if op.id is not None],
+        work_order_status=work_order.status,
+    )
+
+
+@router.post("/operations/{operation_id}/skip", response_model=WorkOrderRoutingChangeResponse)
+def skip_operation(
+    operation_id: int,
+    body: WorkOrderOperationSkipRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Skip a step that has not started: it stays on the traveler as SKIPPED (who / when / why).
+
+    Owner decision 2026-11-25: a step is never deleted from a released job. A skipped step counts
+    as FINISHED -- the steps after it can proceed (they are promoted to READY when nothing else
+    blocks them) -- and it produced nothing (no good, no scrap, no material consumed, no share of
+    the finished quantity). Skipping the last open step of a job whose other steps are complete
+    completes the work order, through the same reconcile a read of the work order runs.
+
+    Body: the operation's current ``version`` and a ``reason`` (required, 1-500 characters),
+    written to the REQUIRED audit row (**503**, nothing saved, when it cannot be). Works on a
+    DRAFT work order too. Refused: **404** operation or work order missing / deleted; **409**
+    stale version, a complete / closed / cancelled work order, a laser nest work order, a step
+    that is not PENDING or READY, a step with recorded work (a start, pieces or any labor), the
+    last step that is not skipped, a skip that would leave an ON_HOLD work order with no
+    unfinished step (it would complete a held job: resume the work order first), or a skip that
+    would strand a short-count close; **403** any API token (a routing change is a person's
+    judgment).
+    """
+    operation = routing_change_service.load_operation(db, operation_id, company_id)
+    audit = AuditService(db, current_user, request)
+    with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
+        outcome = routing_change_service.skip_operation(
+            db, operation, version=body.version, reason=body.reason, user=current_user, audit=audit
+        )
+    work_order = operation.work_order
+    affected_wc_ids = {operation.work_center_id, *(op.work_center_id for op in outcome.promoted)}
+    db.commit()
+    # Skipping the last open step finishes the route: let the read-path reconcile complete the
+    # work order exactly as the next GET would (audited transitions, FG receipt, cost rollup),
+    # rather than a second implementation of work-order completion here.
+    db.refresh(work_order)
+    if all(is_operation_finished(op.status) for op in active_work_order_operations(work_order)):
+        _reconcile_and_commit(db, [work_order], current_user, company_id)
+    SchedulingService(db, company_id).update_availability_rates(
+        work_center_ids=[wc_id for wc_id in affected_wc_ids if wc_id], horizon_days=90
+    )
+    return _routing_change_response(db, outcome, work_order, current_user)
+
+
+@router.post("/operations/{operation_id}/unskip", response_model=WorkOrderRoutingChangeResponse)
+def unskip_operation(
+    operation_id: int,
+    body: WorkOrderOperationUnskipRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Restore a SKIPPED step to PENDING (it is promoted to READY when its predecessors are finished).
+
+    Un-worked READY steps the restored one now blocks, under the work order's own sequencing
+    rule, go back to PENDING -- each with its own required audit row. Body: ``version`` and a
+    ``reason`` (required, 1-500 characters), written to the REQUIRED audit row (**503**, nothing
+    saved, when it cannot be). Refused: **404** missing / deleted; **409** stale version, a
+    terminal or laser work order, a step that is not skipped, a restore that would put an
+    unfinished step in front of a step that already has recorded work (it could then never be
+    completed), or one that would strand a short-count close; **403** any API token.
+    """
+    operation = routing_change_service.load_operation(db, operation_id, company_id)
+    audit = AuditService(db, current_user, request)
+    with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
+        outcome = routing_change_service.unskip_operation(
+            db, operation, version=body.version, reason=body.reason, user=current_user, audit=audit
+        )
+    work_order = operation.work_order
+    affected_wc_ids = {
+        operation.work_center_id,
+        *(op.work_center_id for op in outcome.promoted),
+        *(op.work_center_id for op in outcome.demoted),
+    }
+    db.commit()
+    SchedulingService(db, company_id).update_availability_rates(
+        work_center_ids=[wc_id for wc_id in affected_wc_ids if wc_id], horizon_days=90
+    )
+    return _routing_change_response(db, outcome, work_order, current_user)
+
+
+@router.post("/{work_order_id}/operations/resequence", response_model=WorkOrderResequenceResponse)
+def resequence_operations(
+    work_order_id: int,
+    body: WorkOrderOperationsResequenceRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role([UserRole.ADMIN, UserRole.MANAGER, UserRole.SUPERVISOR])),
+    company_id: int = Depends(get_current_company_id),
+):
+    """Reorder steps that have not started by giving them new sequences.
+
+    ``operations`` lists ``{id, version, sequence}`` for each step to move; every listed step must
+    be on this work order (**404**), at its current version (**409**), PENDING or READY with no
+    recorded work (**409**). The resulting sequences (10-990, multiples of 10) must be unique
+    across the work order's steps that are not skipped, listed or not (**409**), no moved step may
+    land in front of a step that already has recorded work under the work order's own predecessor
+    rule (**409**), and the reorder may not strand a short-count close (**409**).
+    ``operation_number`` is never rewritten -- it is the step's identifier on printed travelers and
+    in SPC matching. Un-worked READY steps the new order now blocks go back to PENDING, and steps
+    it unblocks become READY. ``reason`` (required, 1-500 characters) is written to one REQUIRED
+    audit row per moved step (**503**, nothing saved, when one cannot be). **409** for a terminal
+    or laser work order; **403** any API token.
+    """
+    # Operation rows first, then the work order row (routing_change_service.lock_work_order).
+    work_order = routing_change_service.lock_work_order(db, work_order_id, company_id)
+    if not work_order or work_order.is_deleted:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    audit = AuditService(db, current_user, request)
+    with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
+        outcome = routing_change_service.resequence_operations(
+            db, work_order, body.operations, reason=body.reason, user=current_user, audit=audit
+        )
+    db.commit()
+    db.refresh(work_order)
+    operations = routing_change_service.route_operations(db, work_order)
+    _scope_operation_nests(operations, current_user)
+    return WorkOrderResequenceResponse(
+        operations=[WorkOrderOperationResponse.model_validate(op) for op in operations],
+        changed_operation_ids=[op.id for op in outcome.changed if op.id is not None],
+        promoted_operation_ids=[op.id for op in outcome.promoted if op.id is not None],
+        demoted_operation_ids=[op.id for op in outcome.demoted if op.id is not None],
+    )
+
+
+# The operation fields whose change on a released work order is a reasoned routing change (owner
+# decision 2026-11-25) -- PUT /work-orders/operations/{id}. ``work_center_id`` is deliberately absent:
+# the dispatch board and scheduling move operations between machines through the same PUT, reason-free.
+ROUTING_CONTENT_FIELDS = (
+    "name",
+    "description",
+    "setup_instructions",
+    "run_instructions",
+    "setup_time_hours",
+    "run_time_hours",
+    "run_time_per_piece",
+    "requires_inspection",
+    "inspection_type",
+)
 
 
 def _differs_from_stored(requested: Any, stored: Any) -> bool:
@@ -6415,6 +6644,16 @@ def update_operation(
     not-started operation gets "release first" / "Resume Work Order" rather than a count text
     naming doors that job keeps shut. Returns **404** when the operation's work order is
     missing or soft-deleted.
+
+    Routing changes on a released job (owner decision 2026-11-25): changing ``name``,
+    ``description``, ``setup_instructions``, ``run_instructions``, ``setup_time_hours``,
+    ``run_time_hours``, ``run_time_per_piece``, ``requires_inspection`` or ``inspection_type`` on a
+    work order that is not a DRAFT needs ``change_reason`` (**422** without it), is written as
+    REQUIRED audit evidence carrying it (**503**, nothing saved, when it cannot be), and is refused
+    **403** to any API token (a routing change is a person's judgment). A work-center move alone
+    needs no reason and stays open to a token, as does every edit on a DRAFT. Those fields are refused
+    **409** on a COMPLETE operation (they are its record). A SKIPPED operation refuses every edit
+    **409** (restore it with unskip first), and ``status: skipped`` is refused **409** (use skip).
     """
     operation = (
         db.query(WorkOrderOperation)
@@ -6453,6 +6692,17 @@ def update_operation(
             detail="Operation was modified by someone else. Refresh and try again.",
         )
 
+    # Routing changes on a released job (owner decision 2026-11-25). A SKIPPED step is off the
+    # route: nothing here may edit or revive it (restore it with /unskip, reasoned and audited),
+    # and this blind setattr is not a way to skip one either (/skip is). Both before any write.
+    change_reason = update_data.pop("change_reason", None)
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
+    if update_data.get("status") == OperationStatus.SKIPPED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Skip a step with POST /work-orders/operations/{operation.id}/skip, which records why.",
+        )
     # Owner ruling 1 (INT3): a COMPLETE operation's counts and status ARE its completion
     # record -- the short it declared, what the next stage was credited and what consumed
     # material were all decided on them. This blind setattr used to rewrite them with no
@@ -6629,6 +6879,37 @@ def update_operation(
                         detail=open_count_above_recorded_message(operation, requested_good, recorded_good),
                     )
 
+    # Judged AFTER every pre-existing refusal above, so their answers are unchanged. Editing a step's CONTENT (what the floor is told to do and how long it should take) on a work
+    # order that is no longer a DRAFT is a routing change: it needs the reason a person typed, as
+    # REQUIRED audit evidence. A work-center move alone
+    # (the dispatch board and scheduling) and the count / status fields keep their own rules below.
+    # A COMPLETE step's content is the record of what was done, so it is refused outright.
+    content_changes = [
+        field
+        for field in ROUTING_CONTENT_FIELDS
+        if field in update_data and _differs_from_stored(update_data[field], getattr(operation, field))
+    ]
+    reasoned_routing_edit = False
+    if content_changes:
+        if operation.status == OperationStatus.COMPLETE:
+            raise HTTPException(
+                status_code=409,
+                detail="A completed step's name, instructions, time standards and inspection are the record of "
+                "what was done and cannot be edited.",
+            )
+        if operation.work_order.status != WorkOrderStatus.DRAFT:
+            # A routing change on a released job is a person's judgment (owner decision
+            # 2026-11-25): a standing API token is refused, as on skip / unskip / add / resequence.
+            # A work-center move alone and every DRAFT edit stay open to a token.
+            if is_api_token_credential(current_user):
+                raise HTTPException(status_code=403, detail=API_TOKEN_ROUTING_CHANGE)
+            if not change_reason:
+                raise HTTPException(
+                    status_code=422,
+                    detail="change_reason is required to change a step on a work order that has been released.",
+                )
+            reasoned_routing_edit = True
+
     # Work-center reassignment (planner action, e.g. re-dispatching a laser nest to
     # another laser -- but legitimate for any operation between compatible work
     # centers). Validated BEFORE the blind setattr loop so a bad target mutates
@@ -6741,6 +7022,24 @@ def update_operation(
                     "scrap_reason": operation.scrap_reason,
                 },
                 extra_data={"transition": "completed_operation_scrap_correction"},
+            )
+    elif reasoned_routing_edit:
+        # A content change on a released job: REQUIRED evidence carrying the person's reason.
+        with required_audit(db, routing_change_service.ROUTING_AUDIT_UNAVAILABLE):
+            audit.log_update(
+                resource_type="work_order_operation",
+                resource_id=operation.id,
+                resource_identifier=operation.operation_number,
+                old_values=old_values,
+                new_values=operation,
+                description=f"Changed operation {operation.operation_number} on a released work order: {change_reason}",
+                extra_data={
+                    "transition": "operation_content_changed",
+                    "reason": change_reason,
+                    "fields": content_changes,
+                    "work_order_id": operation.work_order_id,
+                },
+                required=True,
             )
     else:
         audit.log_update(
@@ -7012,6 +7311,9 @@ def start_operation(
     enforces -- except when such a predecessor is **ON_HOLD**, which blocks from any work
     center. Laser dispatch-pool work orders are exempt from the gate entirely.
     """
+    # Row-locked before the predecessor gate is read (lock_operation_for_start): a concurrent
+    # routing change cannot put an unfinished step in front of the start it judged.
+    lock_operation_for_start(db, operation_id, company_id)
     operation = (
         db.query(WorkOrderOperation)
         .options(joinedload(WorkOrderOperation.work_order).joinedload(WorkOrder.part))
@@ -7027,6 +7329,8 @@ def start_operation(
     # running one, with an audit row that recorded only the status.
     if operation.status == OperationStatus.COMPLETE:
         raise HTTPException(status_code=400, detail=MSG_ALREADY_COMPLETE)
+    if operation.status == OperationStatus.SKIPPED:
+        raise HTTPException(status_code=409, detail=MSG_OPERATION_SKIPPED)
     if operation.status == OperationStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail=MSG_ALREADY_IN_PROGRESS)
 

@@ -478,6 +478,104 @@ class WorkOrderOperationCreate(WorkOrderOperationBase):
     pass
 
 
+# Routing changes on a released job (owner decision 2026-11-25): every change on a work order
+# that is no longer a DRAFT carries the reason a person typed, stored as required audit evidence.
+# Same width as ``work_order_operations.skip_reason`` (String(500)).
+ROUTING_CHANGE_REASON_MAX_LENGTH = 500
+
+
+def _clean_reason(value: Optional[str], *, required: bool) -> Optional[str]:
+    """Strip a routing-change reason; a blank one is missing (422 when ``required``)."""
+    if value is None:
+        if required:
+            raise ValueError("A reason is required")
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        if required:
+            raise ValueError("A reason is required")
+        return None
+    if len(cleaned) > ROUTING_CHANGE_REASON_MAX_LENGTH:
+        raise ValueError(f"The reason must be at most {ROUTING_CHANGE_REASON_MAX_LENGTH} characters")
+    return cleaned
+
+
+class WorkOrderOperationAddRequest(WorkOrderOperationCreate):
+    """Body of ``POST /work-orders/{id}/operations`` -- one new routing step.
+
+    ``change_reason`` is REQUIRED once the work order is no longer a DRAFT (the route answers
+    422 without it) and is written to the required audit row; on a DRAFT it is optional and
+    ignored. Deliberately a subclass rather than a field on ``WorkOrderOperationCreate``: the
+    ``POST /work-orders`` create flow builds its operations from that schema and must not grow
+    a reason field it never uses.
+    """
+
+    change_reason: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Why the step is being added. Required (1-500 characters after trimming) when the work "
+        "order is not a DRAFT; recorded on the audit row.",
+    )
+
+    @field_validator("change_reason")
+    @classmethod
+    def _strip_change_reason(cls, value: Optional[str]) -> Optional[str]:
+        return _clean_reason(value, required=False)
+
+
+class _RoutingReasonBody(BaseModel):
+    reason: str = Field(
+        ...,
+        max_length=2000,
+        description="Why, in the person's own words (1-500 characters after trimming). Recorded on the "
+        "required audit row.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, value: str) -> str:
+        cleaned = _clean_reason(value, required=True)
+        assert cleaned is not None  # required=True never returns None
+        return cleaned
+
+
+class WorkOrderOperationSkipRequest(_RoutingReasonBody):
+    """Body of ``POST /work-orders/operations/{id}/skip``: the operation's current ``version`` + why."""
+
+    version: int = Field(..., ge=0, description="Operation version for optimistic locking")
+
+
+class WorkOrderOperationUnskipRequest(_RoutingReasonBody):
+    """Body of ``POST /work-orders/operations/{id}/unskip``: the operation's current ``version`` + why."""
+
+    version: int = Field(..., ge=0, description="Operation version for optimistic locking")
+
+
+class WorkOrderOperationSequenceChange(BaseModel):
+    id: int = Field(..., gt=0, description="Operation id (must belong to the work order)")
+    version: int = Field(..., ge=0, description="Operation version for optimistic locking")
+    sequence: int = Field(
+        ...,
+        ge=10,
+        le=990,
+        multiple_of=10,
+        description="New sequence (10-990, multiples of 10). operation_number is never rewritten.",
+    )
+
+
+class WorkOrderOperationsResequenceRequest(_RoutingReasonBody):
+    """Body of ``POST /work-orders/{id}/operations/resequence``: new sequences for not-started steps."""
+
+    operations: List[WorkOrderOperationSequenceChange] = Field(..., min_length=1, max_length=99)
+
+    @model_validator(mode="after")
+    def _distinct_operations(self) -> "WorkOrderOperationsResequenceRequest":
+        ids = [item.id for item in self.operations]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Each operation may be listed once")
+        return self
+
+
 class WorkOrderCreateOperation(WorkOrderOperationCreate):
     """One operation SUPPLIED on ``POST /work-orders`` (``operations`` non-empty).
 
@@ -524,6 +622,20 @@ class WorkOrderOperationUpdate(BaseModel):
         description="Reason for scrapped parts; required when quantity_scrapped > 0, ignored otherwise.",
     )
     requires_inspection: Optional[bool] = None
+    inspection_type: Optional[str] = Field(None, max_length=100)
+    change_reason: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Why the step's content is changing. Required (1-500 characters after trimming) when the "
+        "work order is not a DRAFT and name, description, instructions, time standards or inspection change; "
+        "recorded on the required audit row. A work-center move alone needs none.",
+    )
+
+    @field_validator("change_reason")
+    @classmethod
+    def _strip_change_reason(cls, value: Optional[str]) -> Optional[str]:
+        return _clean_reason(value, required=False)
+
     # ``inspection_complete`` is deliberately NOT a field: the audited sign-off
     # ``POST /shop-floor/operations/{id}/inspection`` is its only writer (who signed and when lives
     # in that verb's required audit row). A body that still sends it is refused below rather than
@@ -664,6 +776,15 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
     operation_group: Optional[str] = None
     started_by: Optional[int] = None
     completed_by: Optional[int] = None
+    # Routing change on a released job (migration 135): set together when the step was skipped,
+    # null otherwise. ``status`` is then ``skipped``.
+    skipped_at: Optional[datetime] = None
+    skipped_by: Optional[int] = None
+    # Display form of ``skipped_by`` ("Dana R."), resolved on the work-order read
+    # (``work_orders._enrich_work_order_operations``); null when not skipped or not resolvable
+    # in the active company.
+    skipped_by_name: Optional[str] = None
+    skip_reason: Optional[str] = None
     laser_nest: Optional[LaserNestOperationInfo] = None
     cancelled_nest_id: Optional[int] = None
 
@@ -729,6 +850,7 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
         "scheduled_end",
         "actual_start",
         "actual_end",
+        "skipped_at",
         "created_at",
         "updated_at",
         when_used="json",
@@ -738,6 +860,31 @@ class WorkOrderOperationResponse(WorkOrderOperationBase):
 
     class Config:
         from_attributes = True
+
+
+class WorkOrderRoutingChangeResponse(UTCModel):
+    """Result of skip / unskip: the changed operation plus what the route did around it.
+
+    ``promoted_operation_ids`` went PENDING -> READY (successors a skip unblocked, or the restored
+    step itself); ``demoted_operation_ids`` went READY -> PENDING (un-worked steps a restored step
+    now blocks). ``work_order_status`` is read after the change -- skipping the last open step of
+    a job whose other steps are complete completes the work order through the same reconcile a
+    read runs.
+    """
+
+    operation: WorkOrderOperationResponse
+    promoted_operation_ids: List[int] = Field(default_factory=list)
+    demoted_operation_ids: List[int] = Field(default_factory=list)
+    work_order_status: WorkOrderStatus
+
+
+class WorkOrderResequenceResponse(UTCModel):
+    """Result of ``POST /work-orders/{id}/operations/resequence``: every operation, by sequence."""
+
+    operations: List[WorkOrderOperationResponse]
+    changed_operation_ids: List[int] = Field(default_factory=list)
+    promoted_operation_ids: List[int] = Field(default_factory=list)
+    demoted_operation_ids: List[int] = Field(default_factory=list)
 
 
 class WorkOrderBase(UTCModel):

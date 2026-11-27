@@ -1329,8 +1329,11 @@ company-scoped.
 | POST | `/work-orders/{id}/resume` | **Resume Work Order** — lift a *work-order* hold. Never releases: the target comes from the release record (`released_at` / `released_by`) — IN_PROGRESS when released and worked, RELEASED when released and unworked, **DRAFT** when no release is on record (un-worked READY operations, laser nests included, return to PENDING). **400** when not on hold, **404** when missing or soft-deleted, **503** (nothing changed) when the required audit rows cannot be written. Operation-level holds are untouched. See "Draft and on-hold work orders refuse every start" below | Admin / Manager / Supervisor |
 | POST | `/work-orders/{id}/complete` | Force-complete a work order (privileged override), booking `quantity_complete` as its finished count — the header is **set** to it. **409** if the WO is CANCELLED or an open operation is on hold. **403** for an API token sending a `quantity_scrapped` above the header's recorded scrap (owner decision 2026-11-07: only a person declares scrap), and first among the quantity refusals for an API token completing short or above what the floor recorded. **409** when `quantity_complete` exceeds what the floor recorded (naming the binding operation) unless `quantity_override_reason` is sent, and **400** above what can still exist once declared shorts and covered scrap are out, even with a reason; **409** when the shortfall below the order is not covered by floor-reported scrap or `quantity_scrapped` (with a reason); **503** (nothing saved) when the required audit row cannot be written. See "Short count at completion" below | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/{id}/duplicate` | **Duplicate a work order** — copy its *plan* (operations, laser nests, open material ties, re-snapshotted process-sheet steps) onto a new **DRAFT** WO. Body `{quantity_ordered, due_date}`; **201** returning an **envelope**, not a bare work order. See "Duplicating a work order" below | Admin / Manager / Supervisor |
-| POST | `/work-orders/{id}/operations` | Add an operation to a work order | Admin / Manager / Supervisor |
-| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion". **`inspection_complete` is not an updatable field:** a body that contains the key, with any value (`true`, `false`, `null`), is refused **422** (`inspection_complete cannot be set by an operation update. Sign off the inspection with POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when.`) rather than silently ignored — the sign-off verb is the flag's only writer (Shop Floor → "Inspection Schema"). `requires_inspection` is still accepted, and setting it signs nothing | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/operations` | Add one step to a work order's routing (body `WorkOrderOperationAddRequest` = the operation fields plus optional `change_reason`). On a **DRAFT** this builds the plan, reason-free and open to an API token. Once released it is a **routing change**: `change_reason` required (**422** `change_reason is required to add a step to a work order that has been released.`), required audit row (**503**), any API token **403** `API_TOKEN_ROUTING_CHANGE`. On every work order, DRAFT included: **409** when the `sequence` is used by a step that is not skipped, when the new step would sit in front of a step with recorded work, or when it would strand a short-count close; **400** on a laser nest work order; **409** on a complete / closed / cancelled one. See "Changing a released work order's routing" below | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/skip` | **Skip a step that has not started** — it becomes `skipped` and stays on the traveler with who / when / why. Body `{version, reason}`. Returns `WorkOrderRoutingChangeResponse`. See "Changing a released work order's routing" below | Admin / Manager / Supervisor |
+| POST | `/work-orders/operations/{id}/unskip` | **Restore a skipped step** to `pending`. Body `{version, reason}`. Returns `WorkOrderRoutingChangeResponse` | Admin / Manager / Supervisor |
+| POST | `/work-orders/{id}/operations/resequence` | **Reorder steps that have not started.** Body `{reason, operations: [{id, version, sequence}]}`; `operation_number` is never rewritten. Returns `WorkOrderResequenceResponse` | Admin / Manager / Supervisor |
+| PUT | `/work-orders/operations/{id}` | Update an operation (body now also accepts `work_center_id` — move the operation to another work center; see note below). **409** if it sets `status` to COMPLETE on a not-yet-complete operation — completion goes through the completion endpoints (see "Terminal-state lock"). **409** with the start gate's text if it sets `status` to IN_PROGRESS on an operation of a draft, on-hold or complete / closed / cancelled work order, and **409** "release first" if it sets `status` to READY on a draft — both before any field is written; re-sending the operation's current status is not a transition. **409** with the same text when it **raises** `quantity_complete` on an operation that is (or this write leaves) PENDING / READY of a draft or on-hold work order. These start-gate refusals answer **before** the open-operation count 409s below, so a not-started operation of a draft or held job always gets "release first" / "Resume Work Order", never a count text naming doors that job keeps shut. **404** `Work order not found` when the operation's work order is soft-deleted (see "Draft and on-hold work orders refuse every start"). **On a COMPLETE operation, changing `quantity_complete` or `status`, or lowering `quantity_scrapped`, returns 409** — those are the completion record; correct the good count with `…/reduce-production`, which can reopen the operation (re-sending the stored values, and every other field, is still accepted; scrap found after the close may be **added** with a reason, as required audit evidence, but only into units still unaccounted — a rise past that is 409). On an open operation, raising `quantity_complete` above the good ceiling or the floor's labor record returns 409; an API token may not change the counts or the scrap reason (403 — a `quantity_scrapped` rise or a reason change gets the scrap text, owner decision 2026-11-07). See "Short count at completion". **`inspection_complete` is not an updatable field:** a body that contains the key, with any value (`true`, `false`, `null`), is refused **422** (`inspection_complete cannot be set by an operation update. Sign off the inspection with POST /api/v1/shop-floor/operations/{operation_id}/inspection, which records who signed and when.`) rather than silently ignored — the sign-off verb is the flag's only writer (Shop Floor → "Inspection Schema"). `requires_inspection` is still accepted, and setting it signs nothing. **Routing content on a released job:** changing `name`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection` or `inspection_type` (new on this schema) on a work order that is not DRAFT needs `change_reason` (**422** without it), is written as a required audit row (**503**), and is refused **403** `API_TOKEN_ROUTING_CHANGE` to any API token; on a COMPLETE operation those fields are **409**. A work-center move alone and every DRAFT edit stay reason-free and token-open. A `skipped` operation refuses **every** edit **409** (restore it first), and `status: skipped` is **409** (use `/skip`) | Admin / Manager / Supervisor |
 | POST | `/work-orders/operations/{id}/start` | Start an operation (**office** verb — operators start work through `PUT /shop-floor/operations/{id}/start` and the kiosk, which stay operator-open). Refused before any write, in the shop-floor twin's order: **400** already complete / already in progress (it never re-opens or re-stamps one), **404** work order missing or soft-deleted, **409** draft / on-hold / terminal work order, **409** operation on hold (starting does not lift a hold), **400** predecessors | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/complete` | Record an operation's good and scrap **totals** from the office. It **closes only when good + scrap cover every unit that reached the operation**; otherwise it saves progress and stays open (a submit that changes nothing is a **200** "No change" that writes nothing). 409 if the parent WO is terminal; **409 for a READY operation on a draft or on-hold WO** — completing it would start it. Query params `quantity_scrapped` (a total that never lowers), `scrap_reason` / `scrap_reason_code_id`, `quantity_override_reason`, `acknowledge_open_entries` — see "Short count at completion" below. **403** for an API token raising the scrap total (owner decision 2026-11-07: only a person declares scrap). **Office** verb — the shop-floor twin is the operator path | Admin / Manager / Supervisor / Quality |
 | POST | `/work-orders/operations/{id}/reduce-production` | Supervisor/office over-count correction — walk back good-count across **any** operator's **unapproved** labor on the operation (an operation nobody ever clocked in to has its desk-entered good lowered directly, up to that count); **a COMPLETE operation is correctable here** (unlike the operator's twin), a terminal WO is not; no clock-in required. A correction that would leave a COMPLETE operation short is **409** unless the body sends `reopen_operation: true`, which returns it to in progress (see note below). A standing API token is **403** on every correction | Admin / Manager / Supervisor |
@@ -1341,6 +1344,130 @@ company-scoped.
 | GET | `/work-orders/{id}/material-allocations/{allocation_id}/consumption` | Per-source-lot ledger position of a tie (`issued` / `returned` / `net`) — the pre-confirm read behind the return dialog | Yes |
 | POST | `/work-orders/{id}/material-allocations/{allocation_id}/return` | **Return consumed material to its source lots** — reasoned, audited, compensating. The only verb on this router that posts inventory | Admin / Manager / Supervisor |
 | GET | `/work-orders/{id}/backflush-preview` | **Dry run (PR 4.5)** — what completing this work order would consume, per component and per lot, before anything moves. Pure read: no ledger row, no audit row, no event | Yes |
+
+> **Changing a released work order's routing** (owner decision 2026-11-25, migration `135`;
+> `services/routing_change_service.py`). Four verbs — `POST /work-orders/operations/{id}/skip`,
+> `POST /work-orders/operations/{id}/unskip`, `POST /work-orders/{id}/operations` (add) and
+> `POST /work-orders/{id}/operations/resequence` — plus content edits through
+> `PUT /work-orders/operations/{id}`. Admin / Manager / Supervisor on every one. **Not agent
+> actions:** skip, unskip and resequence are not MCP tools (`catalog.ROUTING_CHANGE_OPERATIONS` in
+> `EXCLUDED_OPERATIONS`), `add_operation` adds steps to a DRAFT work order only (**409** otherwise),
+> and `work_orders_update_operation` takes no `change_reason`, so a content edit on a released job
+> through MCP gets the route's **422** while a work-center move still works — a routing change on a job
+> already on the floor is a person's judgment and their reason (docs/MCP.md §6.1).
+>
+> - **A reason, as required evidence.** Skip, unskip and resequence always take `reason`; add and a
+>   content edit take `change_reason`, required once the work order is no longer a DRAFT. Either is
+>   1–500 characters after trimming (blank = missing, **422**) and is written to a **required** audit
+>   row carrying `extra_data.reason` and a `transition` (`operation_skipped`, `operation_unskipped`,
+>   `operation_added`, `operations_resequenced`, `operation_content_changed`); when that row cannot be
+>   written the change rolls back with **503** `The audit record for this routing change could not be
+>   saved; nothing was changed. Retry.` Each READY step a change sends back to PENDING gets its own
+>   required `STATUS_CHANGE` row. Adding a step to a DRAFT keeps the best-effort create row.
+> - **No API token.** Skip, unskip and resequence on any work order, and add or a content edit on a
+>   non-DRAFT one, refuse every API token **403** `API_TOKEN_ROUTING_CHANGE` (`Changing a released work
+>   order's routing (skipping, restoring, adding, reordering or editing a step) is a person's judgment
+>   and needs their reason: do it signed in to the app, not with an API token.`) before any write.
+>   Adding to or editing a DRAFT, and a work-center move alone (the dispatch board and scheduling use
+>   the same `PUT`), stay reason-free and open to a token.
+> - **Serialized.** Before it reads the route, every verb row-locks **every operation of the work order
+>   (`SELECT … FOR UPDATE`, ascending id), then the work order row**, then (inside the audit write) the
+>   audit chain lock — the operation-then-work-order order the completion and clock-out verbs use, so a
+>   routing change and a completer never deadlock on each other. Two concurrent changes cannot each pass
+>   a whole-route rule (two skips skipping every step), and a routing change serializes with the floor:
+>   clock-in, `PUT /shop-floor/operations/{id}/start` and `POST /work-orders/operations/{id}/start`
+>   row-lock their operation before they read the predecessor gate, so a start either commits first (and
+>   the change's recorded-work guard sees it) or reads the changed route. No routing verb takes the
+>   dispatch-order lock: none writes `dispatch_rank` or `run_order`.
+> - **Refused on every verb:** **404** a missing, soft-deleted or other company's work order or
+>   operation; **409** `The routing of a complete work order cannot be changed.` (closed / cancelled
+>   likewise); **409** on a laser nest work order (add answers **400** there, as before); **409**
+>   `Operation was modified by someone else. Refresh and try again.` on a stale `version`.
+> - **Never in front of recorded work.** A change may not leave an unfinished step in front of a step
+>   that already has recorded work (good, scrap, a start or any labor), judged by the work order's own
+>   predecessor rule — on a sequenced routing any lower sequence, on a pooled one a lower sequence at a
+>   different work center: **409** `Cannot add a step at sequence 15: Op 20 (sequence 20) already has
+>   recorded work, and a step in front of it that is not finished would block it from being completed.
+>   Use a sequence after the work already done.` (`restore this step` / `move a step` for unskip and
+>   resequence). That step would become an uncompletable predecessor, because every completion verb
+>   re-checks the gate. Applies to a DRAFT add too — a DRAFT can still carry worked steps.
+> - **Never strands short-count accounting.** Chain credit flows by sequence, so every verb runs
+>   `routing_change_strands` (the routing twin of `accounting_change_strands`) and answers **409** with
+>   its text when a COMPLETE operation would stop adding up or recorded good would exceed its ceiling,
+>   and — the routing-only case — when an unfinished step would land **at or before a COMPLETE step of
+>   its own credited chain that declared a short**: `Op 15 would come before Op 20, which already closed
+>   short of 2; the steps after it were credited for that loss, and a step in front of it would have to
+>   account for units that no longer exist. Use a sequence after Op 20.` A position that already
+>   existed before the change never blocks it.
+>
+> **Skip** (`{version, reason}`): only a PENDING or READY step with no recorded work (**409** `Only a
+> step that has not started can be skipped; Op 20 is in_progress.` / `… already has recorded work (a
+> start, pieces or labor) and cannot be skipped. …`), never the last step that is not skipped (**409**
+> `A work order must keep at least one step that is not skipped. Cancel the work order instead.`), and
+> on an **ON_HOLD** work order never the step whose skip would leave no step unfinished (**409**
+> `Resume the work order first: it is on hold, and skipping this step would leave no step unfinished,
+> which completes the work order (finished goods received) without the hold ever being lifted.`) —
+> Resume Work Order is the one door back from a hold; skipping any other step of a held job is allowed.
+> The step becomes `skipped` with `skipped_at` / `skipped_by` / `skip_reason`, releases its schedule
+> reservation, and the successors it unblocks are promoted to READY through the one promotion rule (a
+> DRAFT promotes nothing). Skipping the last open step of a job whose other steps are finished
+> completes the work order through the same reconcile a `GET` runs. **Unskip** (`{version, reason}`):
+> **409** `Op 20 is pending, not skipped.`; **409** `Sequence 20 is now used by Op 25 on this work
+> order, so Op 20 cannot be restored there. Move Op 25 to an unused sequence first.` — add and
+> resequence treat a skipped step's sequence as free, and two live steps at one sequence would not
+> gate each other. It lands PENDING; un-worked READY steps it now blocks go back to PENDING through
+> the demotion core (`blocked_by`), and it is promoted when its predecessors are finished. Both answer
+> `WorkOrderRoutingChangeResponse`: `operation`, `promoted_operation_ids`, `demoted_operation_ids`,
+> `work_order_status` (read after the change).
+>
+> **Add** (body as in the table): **409** `Sequence 20 is already used by Op 20 on this work order.
+> Pick an unused sequence.` — only a step that is not skipped holds a sequence, so a replacement may
+> take a skipped step's. **404** `Component part not found` for a `component_part_id` that is not one
+> of the active company's live (not deleted) parts, like the work center's **404**. On a released job the READY steps the new one blocks go back to PENDING.
+> **Resequence** (`{reason, operations: [{id, version, sequence}]}`, 1–99 entries, each id once —
+> **422** `Each operation may be listed once`; `sequence` 10–990 in multiples of 10, **422**
+> otherwise): **404** `Operation 7 is not on this work order`; **409** `Only steps that have not
+> started can be reordered; …` / `Op 20 already has recorded work and cannot be reordered.`; **409**
+> `Sequence 20 would be used by both Op 20 and Op 30. Each step needs its own sequence.` (judged over
+> every step that is not skipped, listed or not). `operation_number` is never rewritten — it is the
+> identifier on printed travelers and in SPC matching. A body that moves nothing is a **200** that
+> writes nothing. Un-worked READY steps the new order newly blocks go back to PENDING (scope
+> `newly_blocked`: one already blocked before the reorder — a supervisor's deliberate READY override —
+> is left alone), steps it unblocks are promoted, and each moved step gets its own required audit row.
+> Answers `WorkOrderResequenceResponse`: `operations` (all, by sequence), `changed_operation_ids`,
+> `promoted_operation_ids`, `demoted_operation_ids`.
+>
+> **What SKIPPED means everywhere else.** A skipped step is **finished, having produced nothing**
+> (`work_order_state_service.FINISHED_OPERATION_STATUSES` = COMPLETE + SKIPPED):
+>
+> - it clears both predecessor twins (SQL and in-memory) and every all-complete check, and it is not
+>   remaining work for scheduling, the work-center deactivation guard or the floor lists — it never
+>   reaches the kiosk, dispatch board or `/shop-floor/operations`;
+> - it is out of `active_work_order_operations`: no good, scrap or declared short, no chain credit (its
+>   ceiling never constrains the next stage), no share of the finished-quantity header, and no part of
+>   the operation progress percentage. A skipped **line item** (no component part, a share of the order)
+>   comes off what the order owes in `finished_quantity_at_all_complete` and
+>   `work_order_completion_bounds` — the two agree, including when every line item is skipped and only
+>   component steps remain (both then owe nothing); a skipped whole-order stage or component step takes
+>   nothing off.
+>   Force-complete leaves it skipped. Completion *records* (audit rows, "completed today", cycle times)
+>   still count COMPLETE alone;
+> - it **consumes nothing**: the routing backflush states no demand for it (a component drops out only
+>   when every step naming it is skipped — a live replica keeps the job's demand), and its
+>   operation-scoped open material ties are **not demand while it is skipped** in readiness and
+>   reservation reads (`services/material_tie_demand.py`), nor in the backflush resolver: a tie on a
+>   skipped step does **not** cancel the BOM line for its part at completion or in
+>   `GET /work-orders/{id}/backflush-preview`, so completion, the preview and readiness agree. The ties
+>   themselves are untouched, so a restore brings them back exactly as they were. A **BOM line** for the
+>   same component still backflushes: the BOM states what the finished part contains, whichever step
+>   fits it;
+> - it is off the route for every other door: clock-in refuses it, both start verbs and the generic
+>   `PUT` refuse it **409** `This operation was skipped and is off the route. Restore it (Restore step on the work
+>   order) before starting, holding or editing it.`, hold refuses **409** `Cannot put a skipped
+>   operation on hold`, the read heal never re-derives it from evidence, and only `/unskip` brings it
+>   back. It stays on the traveler and on `GET /work-orders/{id}`, whose operation rows carry
+>   `skipped_at`, `skipped_by`, `skip_reason` and `skipped_by_name` (the display name, resolved in one
+>   tenant-scoped read; null when the user is outside the active company).
 
 > **Comments on a work order** (the detail page's Comments panel, with @mentions and a Watch
 > toggle) are their own routes, `/comments` and `/watchers` with `entity_type=work_order` — see
@@ -5865,7 +5992,7 @@ uploads go through text extraction + LLM. See
 
 > **Deactivation is refused while live work still references the machine (409).** `DELETE
 > /work-centers/{id}` and a `PUT /work-centers/{id}` that flips `is_active` `true → false` both
-> count the work center's **incomplete operations** (every operation status except `COMPLETE` —
+> count the work center's **incomplete operations** (every operation status except `COMPLETE` and `SKIPPED` —
 > deliberately broader than the dispatch queue: `PENDING`/`ON_HOLD` work is off the queue today but
 > would be stranded on the machine just the same) on **live** work orders (non-deleted, not
 > `COMPLETE`/`CLOSED`/`CANCELLED`). Any such work → **409** with a plain-string detail carrying the
@@ -6894,7 +7021,7 @@ PRs (see [docs/PROCESS_SHEETS_SCOPE.md](PROCESS_SHEETS_SCOPE.md)).
 | POST | `/shop-floor/operations/{id}/complete` | **Close** an operation at the good count the floor already recorded — there is no partial branch, so a **200** always means COMPLETE. Viewer / Shipping get **403** `Insufficient permissions` before the operation is read or the body validated (owner decision P0.4, 2026-11-13). Refused **409**, writing nothing, while recorded good + scrap leave any received unit unaccounted (declare the lost pieces with `quantity_scrapped` + a reason, or leave it open), **403** for an API token declaring scrap (owner decision 2026-11-07: only a person declares scrap) or closing short, **409** for a READY operation on a draft or on-hold work order (completing it would start it); an IN_PROGRESS one stays completable under the same rules. See "Floor completion contract" below | Admin / Manager / Supervisor / Operator / Quality |
 | PUT | `/shop-floor/operations/{id}/hold` | Put an operation on hold and close open time entries. For a live laser nest, optional category/severity/note are saved on the hold event and **do not create a blocker**; Resume/Clear Hold is sufficient. Non-nest categorized holds retain their structured blocker behavior. Cancelled nests return **409** and must be restored first | Yes |
 | PUT | `/shop-floor/operations/{id}/resume` | Take an operation **off** hold. **Restores, never promotes**: `IN_PROGRESS` if it ever started, else `PENDING` — lifted to `READY` only where the shared promotion rule would grant it (parent WO released and non-terminal, no incomplete predecessor — which predecessors count is the work order's `sequential_operations` setting: cross-work-center only on a pool, any earlier-sequence operation on a routing), so `pending` is a normal success status. **409** if the operation backs a **cancelled (soft-deleted) laser nest** — that is a tombstone, not a hold; **400** if it is not `ON_HOLD`; cross-tenant id → **404**. Deliberately does **not** resolve the blocker that caused the hold (that stays with the blocker resolve/dismiss flow); the response carries `open_blockers` so the caller can warn (BLK-4) — each `{ id, category, severity, status, has_note, free_text_withheld }`, plus the caller-supplied `title` **only** for a non-station caller (withheld from a badge-minted crew-station token, same rule as `held`). Each `PENDING → READY` flip it does cause emits `operation_ready` (`user_id: null`). Audited **`STATUS_CHANGE`** (old→new status; `extra_data.transition = "resume_operation"`). Reachable by a badge-minted kiosk token — see "Held work" below | Yes |
-| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
+| POST | `/shop-floor/operations/{id}/inspection` | Sign off an operation's in-process inspection — the **only** writer of `inspection_complete`. A person only: any standing API token is **403** before anything is read, and a crew-station badge token is **403** by the kiosk path fence. **404** for a missing or other-company operation, or one whose work order is soft-deleted. **409** (`MSG_OPERATION_SKIPPED`) for a skipped step — it never ran, so there is nothing to sign; restoring it reopens sign-off. The `MARK_OPERATION_INSPECTED` audit row is required evidence (**503**, nothing signed, when it cannot be written). Not an MCP tool. See "Inspection Schema" below | Admin / Manager / Supervisor / Quality |
 | GET | `/shop-floor/time-entries` | Labor Review list: time entries by production day with review flags, server-paged (see "Labor Review" below). Pure read. A kiosk badge is **403** | Admin / Manager / Supervisor / Quality |
 | POST | `/shop-floor/time-entries/{id}/set-clock-out` | Close or correct another person's **unapproved** entry at a stated time with a reason (hours only; see "Labor Review" below). An API token and a kiosk badge are **403**; not an MCP tool | Admin / Manager / Supervisor |
 | POST | `/shop-floor/time-entries/{id}/approve` | Approve a **closed** TimeEntry (sets `approved` / `approved_by`); **409** while still clocked in; optional body `{"version": n}` → **409** when stale. An API token and a kiosk badge are **403** | Admin / Manager / Supervisor / Quality |

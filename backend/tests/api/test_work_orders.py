@@ -2199,7 +2199,12 @@ class TestOperationCreateWorkCenterTenancy:
         response = client.post(
             f"/api/v1/work-orders/{work_order_b.id}/operations",
             headers=user_headers(admin_b),
-            json={"work_center_id": work_center_b.id, "sequence": 20, "name": "Own op"},
+            json={
+                "work_center_id": work_center_b.id,
+                "sequence": 20,
+                "name": "Own op",
+                "change_reason": "routing test edit",
+            },
         )
 
         assert response.status_code == status.HTTP_200_OK, response.text

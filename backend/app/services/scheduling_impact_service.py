@@ -31,6 +31,7 @@ from app.services.scheduling_projection import (
     _projection_daily_load,
 )
 from app.services.scheduling_service import SchedulingService
+from app.services.work_order_state_service import is_operation_finished
 from app.services.working_calendar_service import load_working_calendars, working_hours
 
 TERMINAL = (WorkOrderStatus.COMPLETE, WorkOrderStatus.CLOSED, WorkOrderStatus.CANCELLED)
@@ -159,7 +160,7 @@ class SchedulingImpactService:
             .all()
         )
         if center_ids is None:
-            center_ids = sorted({op.work_center_id for op in selected_ops if op.status != OperationStatus.COMPLETE})
+            center_ids = sorted({op.work_center_id for op in selected_ops if not is_operation_finished(op.status)})
         centers = (
             self.db.query(WorkCenter)
             .filter(WorkCenter.company_id == self.company_id, WorkCenter.id.in_(center_ids))
@@ -210,7 +211,7 @@ class SchedulingImpactService:
                 op
                 for op in operations.values()
                 if op.work_center_id == center_id
-                and op.status != OperationStatus.COMPLETE
+                and not is_operation_finished(op.status)
                 and not state.orders[op.work_order_id].is_deleted
                 and state.orders[op.work_order_id].status not in TERMINAL
             ]
@@ -230,7 +231,7 @@ class SchedulingImpactService:
             ops = sorted(
                 [op for op in simulated.values() if op.work_order_id == order_id], key=lambda op: (op.sequence, op.id)
             )
-            remaining = [op for op in ops if op.status != OperationStatus.COMPLETE]
+            remaining = [op for op in ops if not is_operation_finished(op.status)]
             existing_finish = max(
                 (_day(op.scheduled_end or op.scheduled_start) for op in remaining if op.scheduled_start), default=None
             )
@@ -442,7 +443,7 @@ class SchedulingImpactService:
                     op.work_order_id
                     for op in simulated.values()
                     if op.work_center_id == center_id
-                    and op.status != OperationStatus.COMPLETE
+                    and not is_operation_finished(op.status)
                     and op.scheduled_start
                     and _day(op.scheduled_start) <= day <= _day(op.scheduled_end or op.scheduled_start)
                     and state.orders[op.work_order_id].status not in TERMINAL

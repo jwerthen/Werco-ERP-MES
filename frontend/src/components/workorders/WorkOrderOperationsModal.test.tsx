@@ -146,3 +146,39 @@ describe('WorkOrderOperationsModal — held work order copy', () => {
     expect(await screen.findByText('Operation 20 (Deburr) completed.')).toBeInTheDocument();
   });
 });
+
+describe('WorkOrderOperationsModal — a SKIPPED step is finished (owner decision 2026-11-25)', () => {
+  // The server treats SKIPPED as finished in both predecessor twins
+  // (FINISHED_OPERATION_STATUSES), so it promotes the step after a skipped one
+  // and accepts its completion. The modal must agree, and must not offer
+  // Complete on the skipped step itself.
+  const sequencedWithSkip = {
+    ...heldWorkOrder,
+    status: 'in_progress',
+    sequential_operations: true,
+    operations: [
+      { ...READY_OP, id: 81, sequence: 10, operation_number: '10', name: 'Saw', status: 'complete', quantity_complete: 10 },
+      { ...READY_OP, id: 82, sequence: 20, operation_number: '20', name: 'Paint', status: 'skipped' },
+      { ...RUNNING_OP, id: 83, sequence: 30, operation_number: '30', name: 'Pack', status: 'ready', quantity_complete: 0 },
+    ],
+  };
+
+  it('does not block the step after a skipped predecessor', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(sequencedWithSkip as never);
+    renderModal();
+
+    const list = await screen.findByRole('list', { name: 'Work order operations' });
+    const pack = within(list).getByRole('button', { name: /Complete operation 30: Pack/ });
+    expect(pack).toBeEnabled();
+    expect(within(list).queryByText(/Complete operation 20 \(Paint\) first/)).not.toBeInTheDocument();
+  });
+
+  it('offers no Complete on the skipped step and counts it as done', async () => {
+    mockedApi.getWorkOrder.mockResolvedValue(sequencedWithSkip as never);
+    renderModal();
+
+    const list = await screen.findByRole('list', { name: 'Work order operations' });
+    expect(within(list).queryByRole('button', { name: /Complete operation 20: Paint/ })).not.toBeInTheDocument();
+    expect(screen.getByText('2 / 3 operations complete')).toBeInTheDocument();
+  });
+});

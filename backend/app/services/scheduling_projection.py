@@ -4,7 +4,8 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from app.models.work_order import OperationStatus, WorkOrderOperation
+from app.models.work_order import WorkOrderOperation
+from app.services.work_order_state_service import is_operation_finished
 from app.services.working_calendar_service import working_hours
 
 
@@ -51,7 +52,7 @@ def _project_work_order_schedule(
     for op in operations:
         if op.sequence <= current_op.sequence:
             continue
-        if op.status == OperationStatus.COMPLETE:
+        if is_operation_finished(op.status):
             continue
         op_start = prev_end + timedelta(days=1)
         op_days = _days_needed_for_operation(op)
@@ -120,7 +121,7 @@ def _calendar_projection(
 ):
     rows = [current_op]
     if forward_schedule:
-        rows += [op for op in operations if op.sequence > current_op.sequence and op.status != OperationStatus.COMPLETE]
+        rows += [op for op in operations if op.sequence > current_op.sequence and not is_operation_finished(op.status)]
     projected = []
     cursor = scheduled_start.date() if isinstance(scheduled_start, datetime) else scheduled_start
     for op in rows:

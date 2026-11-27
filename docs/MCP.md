@@ -192,6 +192,17 @@ route (§8), so an agent can ship but can never send the acknowledgment that acc
 items: 16 convenience + **781** generated, 17 shadowed, two fewer generated than the 783 above. No existing name shifted. Both routes are
 writes, so the read-only catalog is unchanged at 8 convenience + **310** generated.
 
+**Re-checked again on 2026-11-25 after routing changes on a released work order**: skipping a step,
+restoring it and resequencing steps added three write routes, and all three joined
+`EXCLUDED_OPERATIONS` (§6.1, `catalog.ROUTING_CHANGE_OPERATIONS`): a routing change on a job already
+on the floor is a person's judgment, and the reason they type is required audit evidence, so an
+agent must not author one even under a person's own JWT. The count is unchanged at 16 convenience +
+**781** generated, 17 shadowed. No existing name shifted (names are assigned before exclusions are
+dropped). `add_operation` refuses **409** a work order that is not a DRAFT and sends no reason, and
+`work_orders_update_operation` no longer takes `change_reason` (`catalog.WITHHELD_BODY_FIELDS`), so
+its content edits on a released job are refused by the route (**422**) while a work-center move stays
+open. The read-only catalog is unchanged at 8 convenience + **310** generated.
+
 Generated names are derived, not curated — re-run the command after changing a router before
 quoting a name in a prompt.
 `backend/tests/test_mcp_docs_names.py` checks every tool name this file, `CLAUDE.md` and `API.md`
@@ -1033,6 +1044,18 @@ minus two further, named sets:
     shipping over open items, is handled the other way: the ship route is **shadowed** by the
     `mark_shipped` convenience tool, which never sends the acknowledgment (§7, §8). See
     [API.md → Shipping](API.md#shipping).
+  - The three **routing changes on a released work order** (`catalog.ROUTING_CHANGE_OPERATIONS`;
+    owner decision 2026-11-25): `POST /work-orders/operations/{operation_id}/skip`, `…/unskip` and
+    `POST /work-orders/{work_order_id}/operations/resequence`. Skipping, restoring or reordering a
+    step on a job already on the floor is a person's judgment, and the reason they type is stored
+    as required audit evidence. The routes refuse every API token **403**
+    (`app.core.credentials.API_TOKEN_ROUTING_CHANGE`), and the exclusion closes the door a person's
+    own JWT would leave open: an agent skipping a released job's inspection step with a "reason" it
+    wrote itself. Adding a step stays a tool through `add_operation`, which refuses **409** any work
+    order that is not a DRAFT. `work_orders_update_operation` stays a tool for its reason-free uses
+    (a work-center move, a DRAFT edit), but does not take `change_reason`
+    (`catalog.WITHHELD_BODY_FIELDS`), so the route refuses a content edit on a released job **422**.
+    See [API.md → Work Orders](API.md#work-orders).
 
 The `Import Batches` tag also excludes the recoverable Import Center review, receipt,
 correction and commit routes. These wrap the same cutover loaders, including their
@@ -1055,7 +1078,9 @@ exclusions (twenty-eight) and company creation was deleted with its route, while
 list, the Sheet Gaps list, the four untied laser-nest reads and System Health were added (**784**);
 then Labor Review added one read and moved the two labor-approval tools into the exclusions with the
 new set-clock-out write (thirty-one): **783**; the CoC issue then joined the exclusions
-(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781 generated tools**.
+(thirty-two) and the ship route was shadowed by `mark_shipped` (17 shadowed): **781**; on 2026-11-25
+skip / unskip / resequence were added and excluded together (thirty-five), so it stays **781
+generated tools**.
 
 ### 6.2 Naming and the collision policy (`app/mcp/naming.py`)
 
@@ -1167,7 +1192,7 @@ with a 422 that names it, never accepted-and-ignored.
 | `search` | `GET /search/` | `q` (required, 1–100 chars), `limit` (1–50, default 20), `types` (comma-separated) | Global search |
 | `list_work_centers` | `GET /work-centers/` | `name` (case-insensitive substring over name **and** code), `active_only` (default `true`) | Fetches with `limit=5000` and filters client-side; returns `id`, `code`, `name`, `type`, `is_active` |
 | `create_work_order` | `POST /work-orders/` | `part_id`, `quantity_ordered` (required); `work_order_type`, `parent_work_order_id`, `priority`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `sequential_operations`, `serial_numbers`, `auto_routing` (query, default `true`). **No `status` argument** — passing one is a 422 | See [DRAFT guarantees](#9-draft-guarantees). Refuses `work_order_type: "laser_cutting"` **before** calling, with the API's own wording |
-| `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → `GET /work-orders/{id}` and use the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
+| `add_operation` | `POST /work-orders/{id}/operations` | `work_order_id`, `name`, `work_center` (required; **int id or name/code string**); `sequence` (10–990, multiple of 10); passthrough `operation_number`, `description`, `setup_instructions`, `run_instructions`, `setup_time_hours`, `run_time_hours`, `run_time_per_piece`, `requires_inspection`, `inspection_type`, `component_part_id`, `component_quantity`, `operation_group`. No `change_reason`: the tool adds steps to a **DRAFT work order only**. `quantity` is accepted by the schema only to be **refused 422 with an explanation** | **Name guard** (below). **DRAFT only**: it reads the work order first and refuses **409** one that is not a DRAFT, before any write (a released job's routing is a person's change, with their reason, in the app; the route's own 422 for a missing reason also stands if the job is released in between). Work center by name: exact match on name or code → substring → refuses **404** on none, **409** naming the candidates on more than one ("Pass the id"). `sequence` omitted → the next multiple of 10 after the current maximum (10 on an empty plan). **An operation has no quantity of its own** — it runs the work order's `quantity_ordered`; `component_quantity` is the BOM component demand for the step (the per-operation piece target on a batch job), not an operation quantity, so the spec's `quantity` is not aliased to it. Not for laser WOs (the route refuses 400) |
 | `get_work_order` | `GET /work-orders/{id}` or `/work-orders/by-number/{n}` | `work_order_id` **or** `work_order_number` (percent-encoded into the path, so `../` or `?` cannot steer the call onto another route) | Full `WorkOrderResponse`: operations, nests (`operations[].laser_nest`), status, `version`; cost by element (`job_cost_actuals`, null without a JobCost) and `issued_material_cost`; per operation `hours_source` / `recorded_setup_hours` / `recorded_run_hours` / `hours_include_backfill`. Both branches return the same body (by number does not reconcile on read) |
 | `update_work_order` | `PUT /work-orders/{id}` | `work_order_id`, `version` (required); `quantity_ordered`, `priority`, `status`, `sequential_operations`, `due_date`, `customer_name`, `customer_po`, `unit_number`, `notes`, `special_instructions`, `quantity_complete`, `quantity_scrapped`, `scrap_reason` — every `WorkOrderUpdate` field, pinned to the route's own schema by a catalog test | The header edit verb, version-gated (409 when stale). **`status` accepts `draft` / `on_hold` / `cancelled` only** (and `on_hold` only on a released or in-progress job — the route refuses a draft **409**, it has nothing on the floor to hold): `released` and `in_progress` are refused **422** naming the real verbs (`release_work_order`, `work_orders_start_work_order`; both refusals also name `work_orders_resume_work_order`, because the release verb takes draft jobs only, the start verb takes released jobs only, and a hold is lifted by the resume tool) — the route's blind `setattr` would accept them with no `released_at` / `released_by` and no operation promotion; `complete` / `closed` are refused by the route itself. `status: "draft"` is how a released-but-unstarted job is put back (the nest tools use the same PUT); the route then returns every un-worked READY operation to PENDING itself, one required audit row each (**503**, nothing changed, when those rows cannot be written). With an API token, a `quantity_scrapped` above the header's recorded scrap is refused **403** by the route (owner decision 2026-11-07 — a person reports scrap); so are, as this PR's extension, a changed `scrap_reason`, any other change to the header's `quantity_complete` / `quantity_scrapped` (either direction) and lowering `quantity_ordered` once work is recorded. Omitting those fields or re-sending the recorded values works |
 | `duplicate_work_order` | `POST /work-orders/{id}/duplicate` | `work_order_id`, `quantity_ordered` (both required — the route requires the quantity; a laser job ignores it and derives its own from the copied nests), `due_date` | Copies the *plan* onto a new DRAFT (`WORK_ORDER_TEMPLATES.md` / duplicate service); post-checks DRAFT |

@@ -755,9 +755,8 @@ def test_update_operation_already_complete_may_resend_complete(client: TestClien
     resp = client.put(
         f"/api/v1/work-orders/operations/{op.id}",
         headers=headers_for(admin),
-        json={"version": op.version, "status": "complete", "name": "Renamed op"},
+        json={"version": op.version, "status": "complete"},
     )
     assert resp.status_code == status.HTTP_200_OK, resp.text
     op_after = _reload(db_session, WorkOrderOperation, op.id)
     assert op_after.status == OperationStatus.COMPLETE
-    assert op_after.name == "Renamed op"

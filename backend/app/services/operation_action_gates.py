@@ -82,6 +82,14 @@ MSG_OPERATION_ON_HOLD_NO_START = (
     "This operation is on hold — lift it with Resume (kiosk) or Clear Hold (desk) first. "
     "Starting it does not lift a hold."
 )
+# A SKIPPED step (owner decision 2026-11-25) is off the route: no start verb, no hold and no
+# generic edit may bring it back -- only POST /work-orders/operations/{id}/unskip, which is
+# reasoned and audited. 409 on every door that refuses it.
+MSG_OPERATION_SKIPPED = (
+    "This operation was skipped and is off the route. Restore it (Restore step on the work order) before "
+    "starting, holding or editing it."
+)
+MSG_CANNOT_HOLD_SKIPPED = "Cannot put a skipped operation on hold"
 # PUT /work-orders/{id} {status: on_hold} on a DRAFT. Every hold placed from now on is on
 # RELEASED work, which is what lets POST /work-orders/{id}/resume decide where a held job
 # goes back to without guessing whether it was ever authorized for the floor.
@@ -414,6 +422,15 @@ def good_above_ceiling_message(operation: WorkOrderOperation, acct: OperationAcc
 def accounting_strand_message(strand: AccountingStrand) -> str:
     """409: the change would strand another operation's accounting (``accounting_change_strands``)."""
     label = operation_label(strand.operation)
+    if strand.reason == "ahead_of_declared_short":
+        declaring = strand.declaring
+        declaring_label = operation_label(declaring) if declaring is not None else "a completed step"
+        return (
+            f"{label} would come before {declaring_label}, which already closed short of "
+            f"{_qty_text(getattr(declaring, 'quantity_short_declared', 0) or 0)}; the steps after it were credited "
+            f"for that loss, and a step in front of it would have to account for units that no longer exist. "
+            f"Use a sequence after {declaring_label}."
+        )
     if strand.reason == "unaccounted":
         return f"{label} is already complete with these units and would no longer add up; correct {label} first."
     return (
@@ -676,13 +693,41 @@ def operation_has_recorded_work(db: Session, operation: Optional[WorkOrderOperat
     """
     if operation is None:
         return False
+    if _recorded_without_labor_read(operation):
+        return True
+    return operation_has_labor_evidence(db, operation.id, company_id)
+
+
+def _recorded_without_labor_read(operation: WorkOrderOperation) -> bool:
+    """The part of :func:`operation_has_recorded_work` that needs no query (good, scrap, a start)."""
     if float(operation.quantity_complete or 0) > QTY_EPSILON or float(operation.quantity_scrapped or 0) > QTY_EPSILON:
         return True
     if operation.status in (OperationStatus.IN_PROGRESS, OperationStatus.COMPLETE):
         return True
-    if operation.actual_start is not None:
-        return True
-    return operation_has_labor_evidence(db, operation.id, company_id)
+    return operation.actual_start is not None
+
+
+def operation_ids_with_recorded_work(
+    db: Session, operations: Iterable[WorkOrderOperation], company_id: int
+) -> set[int]:
+    """Ids of ``operations`` that :func:`operation_has_recorded_work` reports -- in ONE labor query.
+
+    The batched form of the same rule (not a twin: both read :func:`_recorded_without_labor_read`
+    plus tenant-scoped TimeEntry existence), for the routing-change verbs that judge a whole
+    route at once (``routing_change_service``).
+    """
+    ops = [op for op in operations if op is not None and op.id is not None]
+    recorded = {op.id for op in ops if _recorded_without_labor_read(op)}
+    remaining = [op.id for op in ops if op.id not in recorded]
+    if remaining:
+        recorded.update(
+            row[0]
+            for row in db.query(TimeEntry.operation_id)
+            .filter(TimeEntry.company_id == company_id, TimeEntry.operation_id.in_(remaining))
+            .distinct()
+            .all()
+        )
+    return recorded
 
 
 def operation_has_labor_evidence(db: Session, operation_id: int, company_id: int) -> bool:
@@ -732,6 +777,35 @@ def get_company_open_time_entry(db: Session, user_id: int, operation_id: int, co
         )
         .first()
     )
+
+
+def operation_start_lock_query(db: Session, operation_id: int, company_id: int) -> Any:
+    """``SELECT id ... FOR UPDATE`` of one tenant-scoped operation row (``lock_operation_for_start``)."""
+    return (
+        db.query(WorkOrderOperation.id)
+        .filter(WorkOrderOperation.id == operation_id, WorkOrderOperation.company_id == company_id)
+        .with_for_update()
+    )
+
+
+def lock_operation_for_start(db: Session, operation_id: int, company_id: int) -> None:
+    """Row-lock the operation a start verb is about to start, BEFORE it reads the predecessor gate.
+
+    Clock-in and both start verbs judge ``operation_blocked_by_predecessors`` over the route
+    and then write the operation. A routing change (skip / unskip / add / resequence,
+    ``routing_change_service.lock_work_order``) row-locks every operation of the work order,
+    then the work order. Without this lock a start could pass its gate over the route as it
+    was while a routing change committed a step in front of it, leaving in-progress work
+    behind an unfinished step it can never get past. With it the two serialize on this row:
+    the routing change's recorded-work guard sees a start that committed first, and a start
+    that waited reads the changed route (the caller loads the operation AFTER this call, so
+    it reads the committed row).
+
+    Only this one operation row is locked, and before the work order (OPERATION then WORK
+    ORDER, the documented order). An id-only select, so the caller's own eager-loading query
+    is unaffected. A no-op on SQLite (the tests); a real row lock on Postgres.
+    """
+    operation_start_lock_query(db, operation_id, company_id).first()
 
 
 def operation_blocked_by_predecessors(db: Session, operation: WorkOrderOperation) -> bool:
@@ -854,6 +928,8 @@ def hold_blockers(operation: WorkOrderOperation) -> List[str]:
     """Reasons PUT /shop-floor/operations/{id}/hold would refuse right now."""
     if operation.status == OperationStatus.COMPLETE:
         return [MSG_CANNOT_HOLD_COMPLETE]
+    if operation.status == OperationStatus.SKIPPED:
+        return [MSG_CANNOT_HOLD_SKIPPED]
     return []
 
 

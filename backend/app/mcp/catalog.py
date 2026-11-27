@@ -160,6 +160,34 @@ LABOR_JUDGMENT_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
     }
 )
 
+# And the routing changes on a released work order (owner decision 2026-11-25): skipping a
+# step, restoring a skipped one and resequencing steps. Each is a person's judgment about a job
+# already on the floor, and each stores the person's typed reason as REQUIRED audit evidence.
+# The routes refuse every API token (``app.core.credentials.API_TOKEN_ROUTING_CHANGE``), and a
+# person's own JWT would still reach them through a tool call -- an agent skipping a released
+# job's inspection step, with a "reason" it wrote itself -- so none is a tool. Adding a step
+# stays a tool through the ``add_operation`` convenience tool, which refuses a work order that
+# is not a DRAFT; the generated operation update keeps its work-center move (the dispatch
+# board's door) but not ``change_reason`` (``WITHHELD_BODY_FIELDS``). Named on their own so the
+# credential tests walk exactly these routes.
+ROUTING_CHANGE_OPERATIONS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/work-orders/operations/{operation_id}/skip"),
+        ("POST", "/api/v1/work-orders/operations/{operation_id}/unskip"),
+        ("POST", "/api/v1/work-orders/{work_order_id}/operations/resequence"),
+    }
+)
+
+# Body fields a generated tool does NOT take, by route: dropped from its ``inputSchema`` (so the
+# strict schema refuses the argument) and from what the executor forwards. ``change_reason`` on
+# the operation update is the reason a PERSON gives for editing a step's content on a released
+# work order (REQUIRED audit evidence). Without it the route answers 422 to a content edit on a
+# released job, while the reason-free uses stay open to an agent: a work-center move (the
+# dispatch board), a DRAFT edit, and the count / status fields with their own rules.
+WITHHELD_BODY_FIELDS: Mapping[Tuple[str, str], FrozenSet[str]] = {
+    ("PUT", "/api/v1/work-orders/operations/{operation_id}"): frozenset({"change_reason"}),
+}
+
 # And the Approved Supplier List writes (AS9100D 8.4): recording a supplier-approval
 # decision and loading the controlled QL 7.4 list are a named person's judgment, so they
 # are app actions only (the routes also refuse API tokens). The import preview goes with
@@ -203,6 +231,7 @@ EXCLUDED_OPERATIONS: FrozenSet[Tuple[str, str]] = (
     | COMMENT_WRITE_OPERATIONS
     | INSPECTION_SIGN_OFF_OPERATIONS
     | LABOR_JUDGMENT_OPERATIONS
+    | ROUTING_CHANGE_OPERATIONS
 )
 
 # Every operation in the document that declares NO ``security`` block, BY NAME. None
@@ -740,8 +769,28 @@ def build_catalog(
         for (method, path), (operation, path_level) in secured.items()
         if (method, path) not in dropped
     ]
+    for tool in tools:
+        withheld = WITHHELD_BODY_FIELDS.get(tool.key)
+        if withheld:
+            _withhold_body_fields(tool, withheld)
     tools.sort(key=lambda tool: tool.name)
     return tools
+
+
+def _withhold_body_fields(tool: GeneratedTool, fields: FrozenSet[str]) -> None:
+    """Drop ``fields`` (wire names) from ``tool``'s input schema and from what its executor sends."""
+    inputs = {name for name in tool.body_properties if tool.body_property_map.get(name, name) in fields}
+    if not inputs:
+        return
+    properties = tool.input_schema.get("properties") or {}
+    for name in inputs:
+        properties.pop(name, None)
+        tool.body_property_map.pop(name, None)
+    if "required" in tool.input_schema:
+        tool.input_schema["required"] = [name for name in tool.input_schema["required"] if name not in inputs]
+        if not tool.input_schema["required"]:
+            del tool.input_schema["required"]
+    tool.body_properties = tuple(name for name in tool.body_properties if name not in inputs)
 
 
 def catalog_tags(spec: Mapping[str, Any]) -> Set[str]:

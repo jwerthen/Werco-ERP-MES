@@ -343,7 +343,7 @@ export default function PrintTraveler() {
                   blank, which keeps the `||` chain behaving exactly as before. */}
               <td className="border p-2 font-mono">{operationNumberText(op.operation_number) || op.sequence}</td>
               <td className="border p-2">
-                <div className="font-medium">{op.name}</div>
+                <div className={`font-medium ${op.status === 'skipped' ? 'line-through' : ''}`}>{op.name}</div>
                 {op.description && <div className="text-gray-600">{op.description}</div>}
                 {op.setup_instructions && <div className="text-gray-600">Setup: {op.setup_instructions}</div>}
                 {op.run_instructions && <div className="text-gray-600">Run: {op.run_instructions}</div>}
@@ -361,10 +361,32 @@ export default function PrintTraveler() {
               <td className="border p-2 text-center">{formatHours(op.setup_time_hours)}</td>
               <td className="border p-2 text-center">{formatHours(op.run_time_hours)}</td>
               <td className="border p-2 text-xs">
-                <div>Operator: __________________</div>
-                <div>Date: _____________________</div>
-                <div>Qty Done: ________</div>
-                <div>Qty Scrap: ______</div>
+                {op.status === 'skipped' ? (
+                  // A skipped step stays on the traveler (owner decision 2026-11-25) but
+                  // takes no sign-off: it was taken off the route, with a recorded reason.
+                  <div>
+                    <div className="font-bold">SKIPPED — do not run</div>
+                    {op.skip_reason && <div className="text-gray-600">{op.skip_reason}</div>}
+                    {/* Who and when, so the paper record carries the whole decision. */}
+                    {(op.skipped_by_name || op.skipped_by != null || op.skipped_at) && (
+                      <div className="text-gray-600">
+                        {[
+                          op.skipped_by_name || (op.skipped_by != null ? `User #${op.skipped_by}` : null),
+                          op.skipped_at ? formatCentralDateTime(op.skipped_at) : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div>Operator: __________________</div>
+                    <div>Date: _____________________</div>
+                    <div>Qty Done: ________</div>
+                    <div>Qty Scrap: ______</div>
+                  </>
+                )}
               </td>
             </tr>
           ))}

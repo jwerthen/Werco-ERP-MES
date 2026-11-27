@@ -49,6 +49,7 @@ from app.services.scheduling_projection import (
 )
 from app.services.scheduling_service import SchedulingService
 from app.services.work_center_type_service import get_work_center_group
+from app.services.work_order_state_service import FINISHED_OPERATION_STATUSES, is_operation_finished
 from app.services.working_calendar_service import (
     audit_working_calendar_save,
     load_working_calendars,
@@ -141,7 +142,7 @@ def _load_work_order_for_scheduling(db: Session, work_order_id: int, company_id:
 
 def _get_current_operation(work_order: WorkOrder) -> Tuple[List[WorkOrderOperation], WorkOrderOperation]:
     operations = sorted(work_order.operations, key=lambda op: op.sequence)
-    current_op = next((op for op in operations if op.status != OperationStatus.COMPLETE), None)
+    current_op = next((op for op in operations if not is_operation_finished(op.status)), None)
     if not current_op:
         raise HTTPException(status_code=400, detail="All operations are complete")
     return operations, current_op
@@ -336,13 +337,13 @@ def _find_earliest_capacity_date(
     rows = operations or [operation]
     center_ids = {work_center_id}
     if forward_schedule:
-        center_ids.update(op.work_center_id for op in rows if op.status != OperationStatus.COMPLETE)
+        center_ids.update(op.work_center_id for op in rows if not is_operation_finished(op.status))
     scheduled_ops = (
         db.query(WorkOrderOperation)
         .filter(
             WorkOrderOperation.company_id == company_id,
             WorkOrderOperation.work_center_id.in_(center_ids),
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
             WorkOrderOperation.scheduled_start.isnot(None),
             WorkOrderOperation.work_order_id != operation.work_order_id,
         )
@@ -476,7 +477,7 @@ def get_schedulable_work_orders(
         # Find current operation (first non-complete operation)
         current_op = None
         for op in operations:
-            if op.status != OperationStatus.COMPLETE:
+            if not is_operation_finished(op.status):
                 current_op = op
                 break
 
@@ -515,7 +516,7 @@ def get_schedulable_work_orders(
         remaining_hours = sum(
             float(op.setup_time_hours or 0) + float(op.run_time_hours or 0)
             for op in operations
-            if op.status != OperationStatus.COMPLETE
+            if not is_operation_finished(op.status)
         )
 
         result.append(
@@ -547,7 +548,7 @@ def get_schedulable_work_orders(
                 "quantity_complete": float(wo.quantity_complete or 0),
                 "priority": wo.priority,
                 "total_operations": len(operations),
-                "operations_complete": sum(1 for op in operations if op.status == OperationStatus.COMPLETE),
+                "operations_complete": sum(1 for op in operations if is_operation_finished(op.status)),
                 "remaining_hours": remaining_hours,
                 "setup_hours": float(current_op.setup_time_hours or 0),
                 "run_hours": float(current_op.run_time_hours or 0),
@@ -575,7 +576,7 @@ def get_scheduled_jobs(
         .filter(
             WorkOrder.company_id == company_id,
             WorkOrder.status.in_([WorkOrderStatus.RELEASED, WorkOrderStatus.IN_PROGRESS, WorkOrderStatus.ON_HOLD]),
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
         )
     )
 
@@ -1188,7 +1189,7 @@ def get_capacity_summary(
             .filter(
                 WorkOrder.company_id == company_id,
                 WorkOrderOperation.work_center_id.in_(wc_ids),
-                WorkOrderOperation.status != OperationStatus.COMPLETE,
+                WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
                 WorkOrderOperation.scheduled_start.isnot(None),
             )
             .all()
@@ -1269,7 +1270,7 @@ def get_capacity_heatmap(
         db.query(WorkOrderOperation)
         .filter(
             WorkOrderOperation.work_center_id.in_(wc_ids),
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
             WorkOrderOperation.scheduled_start.isnot(None),
         )
         .all()
@@ -1475,7 +1476,7 @@ def unschedule_work_order(
     cleared_count = 0
     work_center_ids: Set[int] = set()
     for op in operations:
-        if op.status == OperationStatus.COMPLETE:
+        if is_operation_finished(op.status):
             continue
         if op.scheduled_start is not None:
             cleared_count += 1
@@ -1525,7 +1526,7 @@ def get_capacity_for_date(
         db.query(WorkOrderOperation)
         .filter(
             WorkOrderOperation.work_center_id == request.work_center_id,
-            WorkOrderOperation.status != OperationStatus.COMPLETE,
+            WorkOrderOperation.status.notin_(FINISHED_OPERATION_STATUSES),
             WorkOrderOperation.scheduled_start.isnot(None),
         )
         .all()
